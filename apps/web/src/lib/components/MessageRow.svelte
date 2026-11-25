@@ -1,6 +1,6 @@
 <script lang="ts">
   import {
-    Bookmark, Brain, Check, CheckCircle2, ChevronDown, Circle, CornerUpLeft, MessageSquare,
+    Bookmark, Brain, Check, CheckCircle2, ChevronDown, Circle, Clock, CornerUpLeft, MessageSquare,
     Pencil, Pin, PinOff, Quote, RotateCcw, SmilePlus, Square, Trash2, Webhook, Wrench, X,
   } from 'lucide-svelte'
   import type { Attachment as FileAttachment, Message, User } from '@chiorim/shared'
@@ -180,7 +180,14 @@
       </div>
     {/if}
 
-    {#if message.status === 'streaming'}
+    {#if message.status === 'queued'}
+      <div class="stream-state queued-state" role="status">
+        <Clock size={12} />
+        <span>设备离线，已加入待执行队列（上线后自动运行）</span>
+        <button class="button quiet stop-button" type="button" disabled={busy}
+          onclick={() => action(() => workspace.abort(message.id))}><X size={11} /> 取消排队</button>
+      </div>
+    {:else if message.status === 'streaming'}
       <div class="stream-state">
         <span class="stream-caret"></span>
         <span>正在生成</span>

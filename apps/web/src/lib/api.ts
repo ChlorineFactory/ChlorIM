@@ -1,12 +1,12 @@
 import {
-  apiErrorSchema, attachmentSchema, bookmarkListSchema, bookmarkSchema, channelFileListSchema,
-  clearedSessionsResponseSchema, messagePageSchema, messageSchema, okResponseSchema, pinListSchema,
-  reactionToggleResponseSchema, searchHitListSchema, sessionListSchema, sessionResponseSchema,
-  slashCommandResponseSchema, webhookCreatedSchema, webhookListSchema,
+  apiErrorSchema, attachmentSchema, bookmarkListSchema, bookmarkSchema, bridgeDeviceListSchema,
+  bridgeFsListSchema, channelFileListSchema, clearedSessionsResponseSchema, messagePageSchema,
+  messageSchema, okResponseSchema, pinListSchema, reactionToggleResponseSchema, searchHitListSchema,
+  sessionListSchema, sessionResponseSchema, slashCommandResponseSchema, webhookCreatedSchema, webhookListSchema,
 } from '@chiorim/shared'
 import type {
-  Attachment, Bookmark, ChannelFile, CreatedWebhook, Message, ReactionSummary, SearchHit,
-  SendMessageRequest, SessionInfo, SessionResponse, SlashCommandResponse, Webhook,
+  Attachment, Bookmark, BridgeDevice, BridgeFsList, ChannelFile, CreatedWebhook, Message,
+  ReactionSummary, SearchHit, SendMessageRequest, SessionInfo, SessionResponse, SlashCommandResponse, Webhook,
 } from '@chiorim/shared'
 import { ZodError } from 'zod'
 import type { ZodType, ZodTypeDef } from 'zod'
@@ -151,6 +151,12 @@ export const listWebhooks = (channelId: string): Promise<Webhook[]> =>
 export const createWebhook = (channelId: string, name: string, avatar_url: string | null = null): Promise<CreatedWebhook> =>
   api(`/channels/${channelId}/webhooks`, webhookCreatedSchema, 'POST', { name, avatar_url })
 export const deleteWebhook = (webhookId: string) => remove(`/webhooks/${webhookId}`)
+
+export const listBridgeDevices = (): Promise<BridgeDevice[]> => api('/bridges', bridgeDeviceListSchema)
+export const listBridgeFs = (botId: string, path?: string): Promise<BridgeFsList> => {
+  const query = path ? `?path=${encodeURIComponent(path)}` : ''
+  return api(`/bridges/${botId}/fs${query}`, bridgeFsListSchema)
+}
 
 export async function copyText(text: string) {
   if (navigator.clipboard) {

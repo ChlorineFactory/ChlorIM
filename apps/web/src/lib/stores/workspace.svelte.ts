@@ -604,7 +604,7 @@ export class Workspace {
     // Trim inactive feeds to latest 80 messages to keep DOM & heap bounded.
     for (const [key, feed] of Object.entries(this.feeds)) {
       if (protectedKeys.has(key) || feed.loading) continue
-      if (feed.rows.some(row => row.status === 'streaming')) { protectedKeys.add(key); continue }
+      if (feed.rows.some(row => row.status === 'streaming' || row.status === 'queued')) { protectedKeys.add(key); continue }
       if (feed.rows.length > 80) {
         feed.rows = feed.rows.slice(-80)
         feed.before = feed.rows[0]?.id ?? feed.before

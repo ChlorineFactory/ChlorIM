@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { eq, inArray, or } from 'drizzle-orm'
 import { botCreateSchema, botPatchSchema, providerCreateSchema, providerPatchSchema } from '@chiorim/shared'
-import type { Bot, Provider, User } from '@chiorim/shared'
+import type { Bot, BridgeDevice, Provider, User } from '@chiorim/shared'
 import { adminOnly } from './auth.js'
 import { publicUser } from './chat.js'
 import { bots, botSessions, channelMembers, channels, messages, providers, users } from './db.js'
@@ -84,6 +84,37 @@ export function registerManagement(app: App, services: Services, chatRoutes: Ret
     return { bot_token: token, connect_command: `chior-bridge add --url ${quote(origin)} --token ${quote(token)} --driver ${quote(driver ?? 'codex')} --name ${quote(username)}` }
   }
 
+  app.get('/api/bridges', c => {
+    const rows = db.select({ bot: bots, user: users }).from(bots)
+      .innerJoin(users, eq(bots.user_id, users.id))
+      .where(eq(bots.mode, 'bridge'))
+      .orderBy(bots.created_at)
+      .all()
+      .filter(({ user }) => !user.disabled)
+    const devices: BridgeDevice[] = rows.map(({ bot, user }) => {
+      const live = realtime.runtime(user.id)
+      return {
+        bot_id: user.id,
+        username: user.username,
+        display_name: user.display_name,
+        online: Boolean(live),
+        hostname: live?.hostname ?? bot.runtime_meta_json?.hostname ?? null,
+        driver: live?.driver ?? bot.driver_hint ?? null,
+        cwd: live?.cwd ?? bot.runtime_meta_json?.cwd ?? null,
+        allowed_roots: live?.allowed_roots ?? (live?.cwd ? [live.cwd] : []),
+      }
+    })
+    return c.json(devices)
+  })
+  app.get('/api/bridges/:botId/fs', async c => {
+    const botId = c.req.param('botId')
+    const bot = db.select({ bot: bots, user: users }).from(bots)
+      .innerJoin(users, eq(bots.user_id, users.id))
+      .where(eq(bots.user_id, botId)).get()
+    if (!bot || bot.bot.mode !== 'bridge' || bot.user.disabled) fail(404, 'BOT_NOT_FOUND', 'Bridge device not found')
+    const result = await realtime.listBridgeFs(botId, c.req.query('path') || undefined)
+    return c.json(result)
+  })
   app.get('/api/bots', c => c.json(db.select().from(bots).orderBy(bots.created_at).all().map(botDto)))
   app.post('/api/bots', async c => {
     const { display_name, username, avatar_url, bio, channel_ids, disabled, ...input } = await body(c, botCreateSchema)

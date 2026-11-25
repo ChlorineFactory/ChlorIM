@@ -1,9 +1,11 @@
+import { randomUUID } from 'node:crypto'
 import { and, eq, inArray, isNotNull, or } from 'drizzle-orm'
 import { WebSocket } from 'ws'
-import type { BridgeDown, BridgeRuntime, ClientDown, Member } from '@chiorim/shared'
+import type { BridgeDown, BridgeFsList, BridgeRuntime, BridgeUp, ClientDown, Member } from '@chiorim/shared'
 import { publicUser } from './chat.js'
 import { bots, channelMembers, users } from './db.js'
 import type { Database } from './db.js'
+import { ApiFailure } from './errors.js'
 
 export type BridgeConnection = { ws: WebSocket; runtime?: BridgeRuntime }
 export type ClientConnection = { ws: WebSocket; userId: string; sessionId: string }
@@ -18,6 +20,12 @@ export function writeSocket(ws: WebSocket, data: ClientDown | BridgeDown) {
 export function createRealtime(db: Database) {
   const clients = new Set<ClientConnection>()
   const bridges = new Map<string, BridgeConnection>()
+  const fsPending = new Map<string, {
+    botId: string
+    resolve: (result: BridgeFsList) => void
+    reject: (error: Error) => void
+    timer: NodeJS.Timeout
+  }>()
 
   function publish(event: ClientDown, channelId?: string, nonceOwner?: string) {
     const audience = channelId ? new Set(db.select({ id: channelMembers.user_id }).from(channelMembers)
@@ -71,8 +79,43 @@ export function createRealtime(db: Database) {
   function detach(id: string, bridge: BridgeConnection) {
     if (bridges.get(id) !== bridge) return
     bridges.delete(id)
+    for (const [reqId, pending] of fsPending) {
+      if (pending.botId !== id) continue
+      clearTimeout(pending.timer)
+      fsPending.delete(reqId)
+      pending.reject(new ApiFailure(503, 'DEVICE_OFFLINE', 'Device disconnected'))
+    }
     db.update(bots).set({ runtime_meta_json: null }).where(eq(bots.user_id, id)).run()
     if (bridge.runtime) publish({ type: 'presence.update', user_id: id, online: false })
+  }
+
+  function listBridgeFs(botId: string, path?: string): Promise<BridgeFsList> {
+    const bridge = bridges.get(botId)
+    if (!bridge?.runtime || bridge.ws.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new ApiFailure(503, 'DEVICE_OFFLINE', 'Selected device is currently offline'))
+    }
+    const request_id = randomUUID()
+    return new Promise<BridgeFsList>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        fsPending.delete(request_id)
+        reject(new ApiFailure(504, 'BRIDGE_TIMEOUT', 'Device did not respond in time'))
+      }, 8_000)
+      fsPending.set(request_id, { botId, resolve, reject, timer })
+      if (!writeSocket(bridge.ws, { type: 'fs.list', request_id, ...(path ? { path } : {}) })) {
+        clearTimeout(timer)
+        fsPending.delete(request_id)
+        reject(new ApiFailure(503, 'DEVICE_OFFLINE', 'Device connection lost'))
+      }
+    })
+  }
+
+  function resolveBridgeFs(botId: string, event: Extract<BridgeUp, { type: 'fs.list.result' }>) {
+    const pending = fsPending.get(event.request_id)
+    if (!pending || pending.botId !== botId) return
+    clearTimeout(pending.timer)
+    fsPending.delete(event.request_id)
+    if (event.error) pending.reject(new ApiFailure(400, 'INVALID_PATH', event.error))
+    else pending.resolve({ path: event.path, parent: event.parent, entries: event.entries })
   }
 
   function closeBridge(id: string, reason: string) {
@@ -82,5 +125,5 @@ export function createRealtime(db: Database) {
     bridge.ws.close(4001, reason)
   }
 
-  return { clients, bridges, closeBridge, publish, direct, clientIds, runtime, online, members, memberUpdated, hello, detach }
+  return { clients, bridges, closeBridge, publish, direct, clientIds, runtime, online, members, memberUpdated, hello, detach, listBridgeFs, resolveBridgeFs }
 }

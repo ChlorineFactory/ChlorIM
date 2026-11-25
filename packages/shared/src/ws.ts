@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import {
-  channelSchema, contextEntrySchema, idSchema, memberSchema, messageSchema,
+  bridgeFsEntrySchema, channelSchema, contextEntrySchema, idSchema, memberSchema, messageSchema,
   reactionSummarySchema, runtimeSchema, senderSchema, toolSchema, userSchema, workspaceSchema,
 } from './domain.js'
 import { hasMessageContent, messageFields } from './rest.js'
@@ -49,6 +49,14 @@ export const bridgeUpSchema = z.discriminatedUnion('type', [
   deltaSchema.extend({ type: z.literal('run.delta'), run_id: idSchema }),
   z.object({ type: z.literal('run.done'), run_id: idSchema, external_session_id: externalSession.optional() }),
   z.object({ type: z.literal('run.error'), run_id: idSchema, error: z.string().min(1).max(4000) }),
+  z.object({
+    type: z.literal('fs.list.result'),
+    request_id: idSchema,
+    path: z.string().max(4096),
+    parent: z.string().max(4096).nullable(),
+    entries: z.array(bridgeFsEntrySchema),
+    error: z.string().max(1000).optional(),
+  }),
   pong,
 ]).refine(value => value.type !== 'run.delta' || validDelta(value))
 
@@ -63,6 +71,7 @@ export const bridgeDownSchema = z.discriminatedUnion('type', [
   senderSchema.omit({ id: true }).extend({ type: z.literal('bridge.welcome'), bot_id: idSchema }),
   runStartSchema,
   z.object({ type: z.literal('run.abort'), run_id: idSchema }),
+  z.object({ type: z.literal('fs.list'), request_id: idSchema, path: z.string().max(4096).optional() }),
   ping,
 ])
 

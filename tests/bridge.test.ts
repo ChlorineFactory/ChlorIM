@@ -35,7 +35,10 @@ test('runs a multi-Agent Bridge daemon, resumes custom sessions, aborts a subpro
     (await h.api<{ messages: Message[] }>('GET', messageUrl(id), token)).messages
 
   await send(dm.id, 'offline test')
-  expect((await listMessages(dm.id))[0]).toMatchObject({ status: 'error', error_message: expect.stringContaining('offline') })
+  const queuedOffline = (await listMessages(dm.id))[0]
+  expect(queuedOffline).toMatchObject({ status: 'queued' })
+  await h.api('POST', `/api/messages/${queuedOffline.id}/abort`, admin.token)
+  expect((await listMessages(dm.id))[0]).toMatchObject({ status: 'aborted' })
   const script = join(h.dataDir, 'fixture.mjs')
   const cancelled = join(h.dataDir, 'cancelled')
   const invoked = join(h.dataDir, 'invoked')

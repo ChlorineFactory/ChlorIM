@@ -52,10 +52,12 @@ pnpm dev:server
 | DELETE `/invites/:code` | 管理员。撤销邀请码 |
 | POST `/uploads` | `multipart/form-data` 的 `file` 字段。返回 `{ url, name, mime, size }`。接受常见位图、文本和源代码。受支持的源码扩展名在 MIME 为空或为 `application/octet-stream` 时按纯文本接收 |
 | GET `/uploads/:filename` | 此行无 `/api` 前缀。随机 URL，默认鉴权且不缓存。公开模式启用长期缓存。文本作为下载 |
-| GET `/workspaces` | 返回当前成员可见的 `Workspace[]`（绑定文件夹目录的工作区列表） |
-| POST `/workspaces` | 接收 `name, work_dir?, description?, icon?, color?, create_default_channel?`。默认自动创建 `#general` |
-| PATCH `/workspaces/:id` | 工作区创建者或管理员。更新 `name, work_dir, description, icon, color`，广播 `workspace.updated` 并刷新下属频道的 `effective_work_dir` |
-| DELETE `/workspaces/:id` | 工作区创建者或管理员。删除工作区及下属非 DM 频道，广播 `channel.removed` 与 `workspace.removed` |
+| GET `/workspaces` | 返回当前成员可见的 `Workspace[]`（文件夹分组列表，含 `work_dir, host_bot_id, host_name`） |
+| POST `/workspaces` | 接收 `name, work_dir?, host_bot_id?, host_name?, description?, icon?, color?, create_default_channel?`。默认自动创建 `#general` |
+| PATCH `/workspaces/:id` | 管理员或创建者。更新文件夹分组及关联设备，广播 `workspace.updated` 并刷新下属频道目录 |
+| DELETE `/workspaces/:id` | 管理员或创建者。删除文件夹分组及下属非 DM 频道，广播 `channel.removed` 与 `workspace.removed` |
+| GET `/bridges` | 返回已启用的本地 Bridge 设备列表（含 `online, hostname, driver, cwd, allowed_roots`） |
+| GET `/bridges/:botId/fs` | 可选 `?path=`。通过 `/ws/bridge` 只读 RPC 列出设备 `allowed_roots` 范围内的子文件夹；设备离线返回 `503 DEVICE_OFFLINE` |
 | GET `/channels` | 当前成员可见的 `Channel[]`，含 `workspace_id, work_dir, effective_work_dir, dm_peer, member_count, unread_count, last_message_at` |
 | POST `/channels` | 接收 `type: public \| private \| board, name, workspace_id?, work_dir?, topic?, system_context?, member_ids?`。返回 `Channel` |
 | POST `/channels/dm` | 接收 `target_user_id`。返回唯一的双人 `Channel`，`dm_peer` 是对端 |

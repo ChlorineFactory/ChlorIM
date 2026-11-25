@@ -51,6 +51,8 @@ export const workspaces = sqliteTable('workspaces', {
   icon: text(),
   color: text(),
   work_dir: text(),
+  host_bot_id: text().references(() => users.id, { onDelete: 'set null' }),
+  host_name: text(),
   description: text().notNull().default(''),
   created_by: text().notNull().references(() => users.id),
   created_at: integer().notNull(),
@@ -122,6 +124,14 @@ export const webhooks = sqliteTable('webhooks', {
   created_by: text().notNull().references(() => users.id),
   created_at: integer().notNull(),
 }, t => [index('webhooks_channel').on(t.channel_id)])
+export const queuedRuns = sqliteTable('queued_runs', {
+  message_id: text().primaryKey().references(() => messages.id, { onDelete: 'cascade' }),
+  bot_id: text().notNull().references(() => users.id, { onDelete: 'cascade' }),
+  channel_id: text().notNull().references(() => channels.id, { onDelete: 'cascade' }),
+  source_message_id: text().notNull().references(() => messages.id, { onDelete: 'cascade' }),
+  sender_id: text().notNull().references(() => users.id, { onDelete: 'cascade' }),
+  created_at: integer().notNull(),
+}, t => [index('queued_runs_bot').on(t.bot_id, t.created_at)])
 
 const migrations = [`
 CREATE TABLE users (
@@ -242,6 +252,18 @@ CREATE TABLE workspaces (
 ALTER TABLE channels ADD COLUMN workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE;
 ALTER TABLE channels ADD COLUMN work_dir TEXT;
 CREATE INDEX channels_workspace ON channels(workspace_id);
+`, `
+ALTER TABLE workspaces ADD COLUMN host_bot_id TEXT REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE workspaces ADD COLUMN host_name TEXT;
+CREATE TABLE queued_runs (
+  message_id TEXT PRIMARY KEY NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  bot_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+  source_message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  sender_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX queued_runs_bot ON queued_runs(bot_id, created_at);
 `]
 
 export type Database = BetterSQLite3Database
@@ -288,7 +310,7 @@ export function openDatabase(filename: string): OpenDatabase {
       if (version > migrations.length) throw new Error('Database schema is newer than this server')
       migrations.slice(version).forEach(migration => sqlite.exec(migration))
       sqlite.pragma(`user_version = ${migrations.length}`)
-      sqlite.prepare("UPDATE messages SET status='error', error_message='Server restarted during the run', updated_at=? WHERE status='streaming'").run(Date.now())
+      sqlite.prepare("UPDATE messages SET status='error', error_message='Server restarted during the run', updated_at=? WHERE status='streaming' AND id NOT IN (SELECT message_id FROM queued_runs)").run(Date.now())
       sqlite.prepare('UPDATE bots SET runtime_meta_json=NULL WHERE runtime_meta_json IS NOT NULL').run()
       const orphan = sqlite.prepare("SELECT id, created_by, created_at FROM channels WHERE type <> 'dm' AND workspace_id IS NULL LIMIT 1").get() as { id: string; created_by: string; created_at: number } | undefined
       if (orphan) {

@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto'
-import { and, eq, inArray } from 'drizzle-orm'
+import { and, asc, eq, inArray } from 'drizzle-orm'
 import type { BridgeUp, Delta, MessageBlock, RunStart, ToolCall, User } from '@chiorim/shared'
-import { MAX_BOT_HOPS } from './chat.js'
+import { MAX_BOT_HOPS, publicUser } from './chat.js'
 import type { createChat } from './chat.js'
-import { bots, botSessions, messages, providers } from './db.js'
+import { bots, botSessions, channels, messages, providers, queuedRuns, users } from './db.js'
 import type { BotRow, ChannelRow, Database, MessageRow } from './db.js'
 import { fail } from './errors.js'
 import { providerError, runProvider } from './providers.js'
@@ -199,12 +199,47 @@ export function createEngine(db: Database, chat: ReturnType<typeof createChat>, 
       const offline = bot.mode === 'bridge' && !realtime.runtime(bot.user_id)
       const row = chat.insert({
         channel_id: room.id, thread_root_id: source.thread_root_id, author_id: bot.user_id, reply_to_id: source.id,
-        status: offline ? 'error' : 'streaming', bot_hop_count: source.bot_hop_count + 1,
+        status: 'streaming', bot_hop_count: source.bot_hop_count + 1,
         board_status: room.type === 'board' && !source.thread_root_id ? 'open' : null,
-        error_message: offline ? 'Bot is offline. Check the local chior-bridge service.' : null,
+        error_message: null,
       })
-      chat.created(row)
-      if (!offline) dispatch(room, bot, row, source, sender)
+      if (offline) {
+        db.insert(queuedRuns).values({
+          message_id: row.id, bot_id: bot.user_id, channel_id: room.id,
+          source_message_id: source.id, sender_id: sender.id, created_at: Date.now(),
+        }).run()
+        chat.created(row)
+      } else {
+        chat.created(row)
+        dispatch(room, bot, row, source, sender)
+      }
+    }
+  }
+
+  function drainQueued(botId: string) {
+    if (closed || !realtime.runtime(botId)) return
+    const pending = db.select().from(queuedRuns)
+      .where(eq(queuedRuns.bot_id, botId))
+      .orderBy(asc(queuedRuns.created_at), asc(queuedRuns.message_id))
+      .all()
+    for (const item of pending) {
+      const removed = db.delete(queuedRuns).where(eq(queuedRuns.message_id, item.message_id)).returning().get()
+      if (!removed) continue
+      const row = db.select().from(messages).where(eq(messages.id, item.message_id)).get()
+      if (!row || row.status !== 'streaming') continue
+      const room = db.select().from(channels).where(eq(channels.id, item.channel_id)).get()
+      const target = room ? chat.memberBots(room.id).find(({ user }) => user.id === botId && !user.disabled) : undefined
+      const source = db.select().from(messages).where(eq(messages.id, item.source_message_id)).get()
+      const senderRow = db.select().from(users).where(eq(users.id, item.sender_id)).get()
+      if (!room || !target || !source || !senderRow) {
+        const aborted = db.update(messages).set({
+          status: 'aborted', error_message: 'Queued task could no longer be dispatched', updated_at: Date.now(),
+        }).where(eq(messages.id, row.id)).returning().get()
+        if (aborted) realtime.publish({ type: 'message.updated', message: chat.dto(aborted) }, aborted.channel_id)
+        continue
+      }
+      realtime.publish({ type: 'message.updated', message: chat.dto(row) }, room.id)
+      dispatch(room, target.bot, row, source, publicUser(senderRow))
     }
   }
 
@@ -220,9 +255,19 @@ export function createEngine(db: Database, chat: ReturnType<typeof createChat>, 
     if (!source || source.status !== 'done') fail(409, 'SOURCE_MISSING', 'An available original message is required')
     const updated = db.update(messages).set({ content: '', blocks_json: [], error_message: null,
       status: 'streaming', updated_at: Date.now(), reply_to_id: source.id }).where(eq(messages.id, id)).returning().get()
+    const offline = target.bot.mode === 'bridge' && !realtime.runtime(target.bot.user_id)
+    if (offline) {
+      db.insert(queuedRuns).values({
+        message_id: updated.id, bot_id: target.bot.user_id, channel_id: room.id,
+        source_message_id: source.id, sender_id: actor.id, created_at: Date.now(),
+      }).onConflictDoUpdate({
+        target: queuedRuns.message_id,
+        set: { source_message_id: source.id, sender_id: actor.id, created_at: Date.now() },
+      }).run()
+    }
     const message = chat.dto(updated)
     realtime.publish({ type: 'message.updated', message }, room.id)
-    dispatch(room, target.bot, updated, source, actor)
+    if (!offline) dispatch(room, target.bot, updated, source, actor)
     return message
   }
 
@@ -254,22 +299,41 @@ export function createEngine(db: Database, chat: ReturnType<typeof createChat>, 
     for (const run of [...active.values()]) if (run.bridge === connection) finish(run, 'error', 'Bridge connection lost')
   }
 
+  function abortQueuedRow(messageId: string) {
+    const removed = db.delete(queuedRuns).where(eq(queuedRuns.message_id, messageId)).returning().get()
+    if (!removed) return false
+    const updated = db.update(messages).set({ status: 'aborted', updated_at: Date.now() })
+      .where(eq(messages.id, messageId)).returning().get()
+    if (updated) realtime.publish({ type: 'message.updated', message: chat.dto(updated) }, updated.channel_id)
+    return true
+  }
+
   function abort(userId: string, isAdmin: boolean, messageId: string) {
     const message = chat.messageRow(messageId)
     chat.access(message.channel_id, userId)
     const run = active.get(messageId)
-    if (!run) return
-    const bot = db.select().from(bots).where(eq(bots.user_id, run.botId)).get()
-    if (!isAdmin && userId !== run.request.sender.id && userId !== bot?.owner_id) {
+    if (run) {
+      const bot = db.select().from(bots).where(eq(bots.user_id, run.botId)).get()
+      if (!isAdmin && userId !== run.request.sender.id && userId !== bot?.owner_id) {
+        fail(403, 'FORBIDDEN', 'Only the sender, bot owner or an administrator can abort this run')
+      }
+      finish(run, 'aborted')
+      return
+    }
+    const queued = db.select().from(queuedRuns).where(eq(queuedRuns.message_id, messageId)).get()
+    if (!queued) return
+    const bot = db.select().from(bots).where(eq(bots.user_id, queued.bot_id)).get()
+    if (!isAdmin && userId !== queued.sender_id && userId !== bot?.owner_id) {
       fail(403, 'FORBIDDEN', 'Only the sender, bot owner or an administrator can abort this run')
     }
-    finish(run, 'aborted')
+    abortQueuedRow(messageId)
   }
 
   function cancelMessages(ids: Set<string>) {
     for (const id of ids) {
       const run = active.get(id)
       if (run) finish(run, 'aborted')
+      else abortQueuedRow(id)
     }
   }
 
@@ -277,6 +341,9 @@ export function createEngine(db: Database, chat: ReturnType<typeof createChat>, 
     for (const run of [...active.values()]) {
       if (run.botId === id && (!channelId || run.channelId === channelId)) finish(run, 'aborted')
     }
+    const queued = db.select({ message_id: queuedRuns.message_id }).from(queuedRuns)
+      .where(and(eq(queuedRuns.bot_id, id), channelId ? eq(queuedRuns.channel_id, channelId) : undefined)).all()
+    for (const item of queued) abortQueuedRow(item.message_id)
   }
 
   function close() {
@@ -284,5 +351,5 @@ export function createEngine(db: Database, chat: ReturnType<typeof createChat>, 
     for (const run of [...active.values()]) finish(run, 'aborted')
   }
 
-  return { trigger, regenerate, botPostHops, resetSessions, bridgeEvent, disconnect, abort, cancelMessages, cancelBot, close }
+  return { trigger, drainQueued, regenerate, botPostHops, resetSessions, bridgeEvent, disconnect, abort, cancelMessages, cancelBot, close }
 }

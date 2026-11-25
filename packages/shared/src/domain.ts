@@ -8,7 +8,7 @@ export const providerTypeSchema = z.enum(['openai_compat', 'anthropic', 'gemini'
 export const botModeSchema = z.enum(['provider', 'bridge'])
 export const triggerPolicySchema = z.enum(['mention', 'always', 'dm_only'])
 export const driverSchema = z.enum(['claude-code', 'codex', 'hermes', 'antigravity', 'custom'])
-export const messageStatusSchema = z.enum(['streaming', 'done', 'aborted', 'error'])
+export const messageStatusSchema = z.enum(['queued', 'streaming', 'done', 'aborted', 'error'])
 export const idSchema = z.string().min(1).max(128)
 export const usernameSchema = z.string().min(2).max(32).regex(/^[a-z0-9_-]+$/)
 export const timestampSchema = z.number().int().nonnegative()
@@ -26,7 +26,28 @@ export const runtimeSchema = z.object({
   hostname: z.string().min(1).max(255),
   driver: driverSchema,
   cwd: z.string().max(4096).optional(),
+  allowed_roots: z.array(z.string().max(4096)).max(64).optional(),
   version: z.string().max(128).optional(),
+})
+export const bridgeFsEntrySchema = z.object({
+  name: z.string().min(1).max(255),
+  path: z.string().min(1).max(4096),
+  kind: z.enum(['dir', 'file']),
+})
+export const bridgeFsListSchema = z.object({
+  path: z.string().max(4096),
+  parent: z.string().max(4096).nullable(),
+  entries: z.array(bridgeFsEntrySchema),
+})
+export const bridgeDeviceSchema = z.object({
+  bot_id: idSchema,
+  username: usernameSchema,
+  display_name: displayNameSchema,
+  online: z.boolean(),
+  hostname: z.string().nullable(),
+  driver: driverSchema.nullable(),
+  cwd: z.string().nullable(),
+  allowed_roots: z.array(z.string()),
 })
 export const userSchema = z.object({
   id: idSchema, kind: userKindSchema, username: usernameSchema, display_name: displayNameSchema,
@@ -45,6 +66,8 @@ export const workspaceSchema = z.object({
   icon: z.string().max(16).nullable(),
   color: z.string().max(32).nullable(),
   work_dir: workDirSchema,
+  host_bot_id: idSchema.nullable(),
+  host_name: z.string().max(255).nullable(),
   description: z.string(),
   created_by: idSchema,
   created_at: timestampSchema,
@@ -145,6 +168,9 @@ export type Attachment = z.infer<typeof attachmentSchema>
 export type ToolCall = z.infer<typeof toolSchema>
 export type ContextEntry = z.infer<typeof contextEntrySchema>
 export type BridgeRuntime = z.infer<typeof runtimeSchema>
+export type BridgeFsEntry = z.infer<typeof bridgeFsEntrySchema>
+export type BridgeFsList = z.infer<typeof bridgeFsListSchema>
+export type BridgeDevice = z.infer<typeof bridgeDeviceSchema>
 export type DriverName = z.infer<typeof driverSchema>
 export type Provider = z.infer<typeof providerSchema>
 export type Bot = z.infer<typeof botSchema>

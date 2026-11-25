@@ -1,9 +1,9 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte'
-  import { Copy, FolderOpen, LogOut, Plus, Sparkles, Trash2, UserMinus, Users, Webhook as WebhookIcon } from 'lucide-svelte'
+  import { ArrowUp, ChevronRight, Copy, Folder, FolderOpen, LogOut, Plus, Sparkles, Trash2, UserMinus, Users, Webhook as WebhookIcon } from 'lucide-svelte'
   import { addMembersSchema, channelCreateSchema, channelPatchSchema, channelSchema, okResponseSchema } from '@chiorim/shared'
-  import type { Channel, CreateChannelRequest, CreatedWebhook, Webhook } from '@chiorim/shared'
-  import { api, copyText, createWebhook, deleteWebhook, errorText, listWebhooks, remove } from '$lib/api'
+  import type { BridgeFsList, Channel, CreateChannelRequest, CreatedWebhook, Webhook } from '@chiorim/shared'
+  import { api, copyText, createWebhook, deleteWebhook, errorText, listBridgeFs, listWebhooks, remove } from '$lib/api'
   import Avatar from '$lib/components/Avatar.svelte'
   import type { Workspace } from '$lib/stores/workspace.svelte'
 
@@ -29,8 +29,41 @@
   let createdHook = $state<CreatedWebhook | null>(null)
   let error = $state('')
   let busy = $state(false)
+  let pickerOpen = $state(false)
+  let fsData = $state<BridgeFsList | null>(null)
+  let fsLoading = $state(false)
+  let fsError = $state('')
 
   const selectedWs = $derived(workspace.workspaces.find(ws => ws.id === workspaceId))
+  const hostOnline = $derived(Boolean(selectedWs?.host_bot_id && (workspace.presence[selectedWs.host_bot_id]?.online ?? workspace.directory[selectedWs.host_bot_id]?.online)))
+
+  async function browseSubfolder(targetPath?: string) {
+    if (!selectedWs?.host_bot_id) return
+    pickerOpen = true
+    fsLoading = true
+    fsError = ''
+    try {
+      fsData = await listBridgeFs(selectedWs.host_bot_id, targetPath ?? (selectedWs.work_dir || undefined))
+    } catch (failure) {
+      fsError = errorText(failure)
+      fsData = null
+    } finally { fsLoading = false }
+  }
+
+  function pickSubfolder(fullPath: string) {
+    const base = selectedWs?.work_dir?.replace(/[\\/]+$/, '')
+    if (base && fullPath.startsWith(base + '/')) {
+      workDir = fullPath.slice(base.length + 1)
+    } else if (base && fullPath === base) {
+      workDir = ''
+    } else {
+      workDir = fullPath
+    }
+    if (!room && !name.trim()) {
+      name = fullPath.split(/[\\/]/).filter(Boolean).at(-1) ?? ''
+    }
+    pickerOpen = false
+  }
   const resolvedPreview = $derived.by(() => {
     const ch = workDir.trim()
     const ws = selectedWs?.work_dir?.trim()
@@ -209,13 +242,55 @@
     <label>频道名称<input bind:value={name} required maxlength={100} disabled={Boolean(room && !canManage)} placeholder="例如：frontend" /></label>
 
     <label>
-      <span class="label-with-icon"><FolderOpen size={13} /> 绑定目录 / 子文件夹（可选）</span>
+      <span class="label-row-between">
+        <span class="label-with-icon"><FolderOpen size={13} /> 绑定目录 / 子文件夹（可选）</span>
+        {#if hostOnline && (!room || canManage)}
+          <button type="button" class="choice-quick" onclick={() => pickerOpen ? (pickerOpen = false) : void browseSubfolder()}>
+            {pickerOpen ? '收起目录' : '从设备浏览子目录'}
+          </button>
+        {/if}
+      </span>
       <input bind:value={workDir} maxlength={4096} spellcheck={false} disabled={Boolean(room && !canManage)}
         placeholder={selectedWs?.work_dir ? '留空继承分组文件夹，或填相对子路径如 apps/web' : '绝对路径如 /Users/you/Codes/project'} />
       {#if resolvedPreview}
         <small>Agent 在此频道的执行目录：<code>{resolvedPreview}</code></small>
       {/if}
     </label>
+
+    {#if pickerOpen && selectedWs?.host_bot_id}
+      <div class="remote-browser">
+        <div class="remote-browser-head">
+          <span class="remote-path"><FolderOpen size={12} /> {fsData?.path || '设备目录'}</span>
+          {#if fsData && fsData.parent !== null}
+            <button type="button" class="button quiet compact" disabled={fsLoading} onclick={() => void browseSubfolder(fsData?.parent || undefined)}>
+              <ArrowUp size={12} /> 上一级
+            </button>
+          {/if}
+        </div>
+        {#if fsLoading}
+          <div class="remote-browser-empty"><span class="spinner"></span> 读取子目录…</div>
+        {:else if fsError}
+          <div class="remote-browser-empty danger-text">{fsError}</div>
+        {:else if fsData?.entries.length}
+          <div class="remote-browser-list">
+            {#each fsData.entries as item (item.path)}
+              <div class="remote-dir-row">
+                <button type="button" class="remote-dir-pick" onclick={() => pickSubfolder(item.path)}>
+                  <Folder size={13} />
+                  <span>{item.name}</span>
+                </button>
+                <button type="button" class="icon-button" title="进入下级" aria-label={`进入 ${item.name}`}
+                  onclick={() => void browseSubfolder(item.path)}>
+                  <ChevronRight size={14} />
+                </button>
+              </div>
+            {/each}
+          </div>
+        {:else}
+          <div class="remote-browser-empty">当前目录无子文件夹</div>
+        {/if}
+      </div>
+    {/if}
 
     <label>Topic<textarea bind:value={topic} maxlength={1000} rows="2" disabled={Boolean(room && !canManage)} placeholder="频道用途"></textarea></label>
     <label>

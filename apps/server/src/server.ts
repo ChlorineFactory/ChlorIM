@@ -142,6 +142,9 @@ export function createChiorServer(options: ServerOptions = {}): ChiorServer {
               clearTimeout(helloDeadline)
               const { type: _, ...meta } = event
               realtime.hello(user.id, connection, meta)
+              engine.drainQueued(user.id)
+            } else if (connection.runtime && event.type === 'fs.list.result') {
+              realtime.resolveBridgeFs(user.id, event)
             } else if (connection.runtime) {
               engine.bridgeEvent(connection, event)
             } else {

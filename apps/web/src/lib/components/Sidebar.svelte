@@ -48,6 +48,14 @@
     return Boolean(workspace.user?.is_admin || workspace.user?.id === folder.created_by)
   }
 
+  function hostState(folder: FolderGroup) {
+    if (!folder.host_bot_id && !folder.host_name) return null
+    const bot = folder.host_bot_id ? workspace.allMembers.find(m => m.id === folder.host_bot_id) : undefined
+    const online = Boolean(folder.host_bot_id && (workspace.presence[folder.host_bot_id]?.online ?? bot?.online))
+    const label = bot?.bot?.runtime_meta?.hostname ?? folder.host_name ?? bot?.display_name ?? '已绑定设备'
+    return { online, label }
+  }
+
   function toggleFolder(id: string) {
     collapsed[id] = !collapsed[id]
   }
@@ -145,12 +153,23 @@
         </div>
 
         {#if isOpen}
-          {#if folder.work_dir}
-            <button type="button" class="folder-path-chip" title={`点击复制路径：${folder.work_dir}`}
-              onclick={() => void copyText(folder.work_dir!).then(() => workspace.toast('已复制文件夹路径', 'success'))}>
-              <span>{shortPath(folder.work_dir)}</span>
-              <Copy size={10} />
-            </button>
+          {@const host = hostState(folder)}
+          {#if folder.work_dir || host}
+            <div class="folder-meta-row">
+              {#if host}
+                <span class="device-pill" class:online={host.online}
+                  title={host.online ? `设备 ${host.label} 在线` : `设备 ${host.label} 当前离线，@Agent 任务将自动排队等待上线执行`}>
+                  <i></i>{host.label}{host.online ? '' : ' · 离线'}
+                </span>
+              {/if}
+              {#if folder.work_dir}
+                <button type="button" class="folder-path-chip" title={`点击复制路径：${folder.work_dir}`}
+                  onclick={() => void copyText(folder.work_dir!).then(() => workspace.toast('已复制文件夹路径', 'success'))}>
+                  <span>{shortPath(folder.work_dir)}</span>
+                  <Copy size={10} />
+                </button>
+              {/if}
+            </div>
           {/if}
 
           {#each rooms as room (room.id)}

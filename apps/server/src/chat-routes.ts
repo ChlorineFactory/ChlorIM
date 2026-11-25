@@ -5,7 +5,7 @@ import {
   workspaceCreateSchema, workspacePatchSchema,
 } from '@chiorim/shared'
 import type { User } from '@chiorim/shared'
-import { botSessions, channelMembers, channelPins, channels, messages, reactions, workspaces } from './db.js'
+import { botSessions, bots, channelMembers, channelPins, channels, messages, reactions, users, workspaces } from './db.js'
 import type { ChannelRow, MessageRow } from './db.js'
 import { body, fail, parse } from './errors.js'
 import { registerDiscovery } from './discovery.js'
@@ -24,12 +24,26 @@ export function registerChat(app: App, services: Services) {
     return row
   }
 
+  function resolveHostMeta(hostBotId?: string | null, hostName?: string | null) {
+    if (!hostBotId) return { host_bot_id: null, host_name: hostName ?? null }
+    const bot = db.select({ bot: bots, user: users }).from(bots)
+      .innerJoin(users, eq(bots.user_id, users.id))
+      .where(eq(bots.user_id, hostBotId)).get()
+    if (!bot || bot.bot.mode !== 'bridge') fail(400, 'INVALID_HOST_BOT', 'Selected device must be a Bridge bot')
+    const live = realtime.runtime(hostBotId)
+    return {
+      host_bot_id: hostBotId,
+      host_name: hostName ?? live?.hostname ?? bot.bot.runtime_meta_json?.hostname ?? bot.user.display_name,
+    }
+  }
+
   app.get('/api/workspaces', c => c.json(chat.listWorkspaces()))
   app.post('/api/workspaces', async c => {
-    const { create_default_channel, ...input } = await body(c, workspaceCreateSchema)
+    const { create_default_channel, host_bot_id, host_name, ...rest } = await body(c, workspaceCreateSchema)
     const userId = c.get('user').id
+    const host = resolveHostMeta(host_bot_id, host_name)
     const { workspace, defaultChannel } = db.transaction(() => {
-      const workspace = chat.createWorkspace(userId, input)
+      const workspace = chat.createWorkspace(userId, { ...rest, ...host })
       const defaultChannel = create_default_channel
         ? chat.createChannel(userId, { type: 'public', name: 'general', workspace_id: workspace.id }, [])
         : undefined
@@ -44,8 +58,12 @@ export function registerChat(app: App, services: Services) {
     const user = c.get('user')
     const current = chat.workspaceRow(c.req.param('id'))
     if (!user.is_admin && current.created_by !== user.id) fail(403, 'FORBIDDEN', 'Workspace owner or administrator required')
-    const updated = Object.keys(patch).length
-      ? db.update(workspaces).set(patch).where(eq(workspaces.id, current.id)).returning().get()
+    const nextPatch = { ...patch }
+    if (patch.host_bot_id !== undefined) {
+      Object.assign(nextPatch, resolveHostMeta(patch.host_bot_id, patch.host_name))
+    }
+    const updated = Object.keys(nextPatch).length
+      ? db.update(workspaces).set(nextPatch).where(eq(workspaces.id, current.id)).returning().get()
       : current
     realtime.publish({ type: 'workspace.updated', workspace: updated })
     for (const room of db.select({ id: channels.id }).from(channels).where(eq(channels.workspace_id, updated.id)).all()) {

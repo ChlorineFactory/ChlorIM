@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, lte, or, sql } from 'drizzle-orm'
 import { monotonicFactory } from 'ulid'
 import type { Channel, ClientDown, Message, ReactionSummary, SendMessageRequest, User, Workspace } from '@chiorim/shared'
-import { bots, channelMembers, channelPins, channels, messages, reactions, users, workspaces } from './db.js'
+import { bots, channelMembers, channelPins, channels, messages, queuedRuns, reactions, users, workspaces } from './db.js'
 import type { ChannelRow, Database, MessageRow, UserRow, WorkspaceRow } from './db.js'
 import { fail } from './errors.js'
 
@@ -68,11 +68,21 @@ export function createChat(db: Database, publish: (event: ClientDown, channelId?
     return db.select({ id: workspaces.id }).from(workspaces).orderBy(workspaces.created_at, workspaces.id).get()?.id ?? null
   }
 
-  function createWorkspace(owner: string, data: { name: string; work_dir?: string | null; icon?: string | null; color?: string | null; description?: string }) {
+  function createWorkspace(owner: string, data: {
+    name: string
+    work_dir?: string | null
+    host_bot_id?: string | null
+    host_name?: string | null
+    icon?: string | null
+    color?: string | null
+    description?: string
+  }) {
     return db.insert(workspaces).values({
       id: randomUUID(),
       name: data.name,
       work_dir: data.work_dir ?? null,
+      host_bot_id: data.host_bot_id ?? null,
+      host_name: data.host_name ?? null,
       icon: data.icon ?? null,
       color: data.color ?? null,
       description: data.description ?? '',
@@ -177,6 +187,10 @@ export function createChat(db: Database, publish: (event: ClientDown, channelId?
   function dto(row: MessageRow): Message {
     const author = db.select().from(users).where(eq(users.id, row.author_id)).get()!
     const { blocks_json: blocks, ...message } = row
+    const status = row.status === 'streaming'
+      && db.select({ id: queuedRuns.message_id }).from(queuedRuns).where(eq(queuedRuns.message_id, row.id)).get()
+      ? 'queued' as const
+      : row.status
     const reply_count = row.thread_root_id ? 0 : db.select({ count: sql<number>`count(*)` }).from(messages)
       .where(eq(messages.thread_root_id, row.id)).get()!.count
     const quote = row.reply_to_id ? db.select({
@@ -184,7 +198,7 @@ export function createChat(db: Database, publish: (event: ClientDown, channelId?
       content: messages.content, status: messages.status,
     }).from(messages).innerJoin(users, eq(users.id, messages.author_id))
       .where(and(eq(messages.id, row.reply_to_id), eq(messages.channel_id, row.channel_id))).get() : undefined
-    return { ...message, author: publicUser(author), blocks, reply_count, reply_to: quote ?? null, reactions: reactionSummary(row.id) }
+    return { ...message, status, author: publicUser(author), blocks, reply_count, reply_to: quote ?? null, reactions: reactionSummary(row.id) }
   }
 
   function root(channelId: string, rootId?: string | null) {

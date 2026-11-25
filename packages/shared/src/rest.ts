@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import {
   attachmentSchema, avatarUrlSchema, boardStatusSchema, bookmarkSchema, botModeSchema, botSchema,
-  channelFileSchema, channelSchema, displayNameSchema, driverSchema, idSchema, inviteSchema,
+  bridgeDeviceSchema, bridgeFsListSchema, channelFileSchema, channelSchema, displayNameSchema, driverSchema, idSchema, inviteSchema,
   memberSchema, messageSchema, presenceStatusSchema, providerSchema, providerTypeSchema,
   reactionSummarySchema, searchHitSchema, sessionInfoSchema, timestampSchema, triggerPolicySchema,
   usernameSchema, userSchema, webhookSchema, workDirSchema, workspaceSchema,
@@ -34,6 +34,8 @@ export const inviteCreateSchema = z.object({
 export const workspaceCreateSchema = z.object({
   name: displayNameSchema,
   work_dir: workDirSchema.optional().default(null),
+  host_bot_id: idSchema.nullable().optional().default(null),
+  host_name: z.string().trim().min(1).max(255).nullable().optional().default(null),
   icon: z.string().trim().min(1).max(16).nullable().optional().default(null),
   color: z.string().trim().min(1).max(32).nullable().optional().default(null),
   description: z.string().max(1000).default(''),
@@ -147,6 +149,8 @@ export const bookmarkListSchema = z.array(bookmarkSchema)
 export const channelFileListSchema = z.array(channelFileSchema)
 export const webhookListSchema = z.array(webhookSchema)
 export const searchHitListSchema = z.array(searchHitSchema)
+export const bridgeDeviceListSchema = z.array(bridgeDeviceSchema)
+export { bridgeFsListSchema }
 
 export const apiErrorSchema = z.object({
   error: z.object({ code: z.string(), message: z.string(), details: z.unknown().optional() }),

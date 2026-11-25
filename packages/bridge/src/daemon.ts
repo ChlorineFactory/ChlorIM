@@ -1,8 +1,8 @@
 import { spawnSync } from 'node:child_process'
 import { isDeepStrictEqual } from 'node:util'
-import { appendFileSync, linkSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, linkSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { hostname } from 'node:os'
-import { isAbsolute, relative } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative } from 'node:path'
 import { WebSocket } from 'ws'
 import { bridgeDownSchema, bridgeUpSchema } from '@chiorim/shared'
 import type { BridgeUp, RunStart } from '@chiorim/shared'
@@ -76,6 +76,31 @@ function connectAgent(config: ResolvedAgent, changed: () => void, log: (message:
     ws.send(JSON.stringify(parsed.data), error => { if (error) ws.terminate() })
   }
 
+  const SKIP_DIRS = new Set(['.git', 'node_modules', '.pnpm-store', '.svelte-kit', '__pycache__', '.DS_Store', '.Trash'])
+
+  function effectiveRoots() {
+    const raw = config.allowed_roots.length ? config.allowed_roots : [config.cwd]
+    const seen = new Set<string>()
+    const resolved: string[] = []
+    for (const root of raw) {
+      try {
+        const real = realpathSync(expandHome(root))
+        if (statSync(real).isDirectory() && !seen.has(real)) {
+          seen.add(real)
+          resolved.push(real)
+        }
+      } catch { /* Ignore missing roots */ }
+    }
+    return resolved
+  }
+
+  function isWithinRoots(targetReal: string, roots: string[]) {
+    return roots.some(rootReal => {
+      const rel = relative(rootReal, targetReal)
+      return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
+    })
+  }
+
   function resolveRunCwd(workDir?: string) {
     if (!workDir) return config.cwd
     const candidate = expandHome(workDir)
@@ -86,18 +111,50 @@ function connectAgent(config: ResolvedAgent, changed: () => void, log: (message:
     } catch {
       throw new Error(`Channel work_dir "${workDir}" does not exist or is not a directory on this machine`)
     }
-    const roots = config.allowed_roots.length ? config.allowed_roots : [config.cwd]
-    const permitted = roots.some(root => {
-      try {
-        const rootReal = realpathSync(root)
-        const rel = relative(rootReal, targetReal)
-        return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
-      } catch { return false }
-    })
-    if (!permitted) {
+    const roots = effectiveRoots()
+    if (!isWithinRoots(targetReal, roots)) {
       throw new Error(`Channel work_dir "${workDir}" is outside allowed_roots in bridge.yaml`)
     }
     return targetReal
+  }
+
+  function handleFsList(ws: WebSocket, request_id: string, requestedPath?: string) {
+    try {
+      const roots = effectiveRoots()
+      if (!requestedPath?.trim()) {
+        const entries = roots.map(root => ({ name: basename(root) || root, path: root, kind: 'dir' as const }))
+        send(ws, { type: 'fs.list.result', request_id, path: '', parent: null, entries })
+        return
+      }
+      const dirReal = resolveRunCwd(requestedPath)
+      const rawEntries = readdirSync(dirReal, { withFileTypes: true })
+      const entries: Array<{ name: string; path: string; kind: 'dir' | 'file' }> = []
+      for (const item of rawEntries) {
+        if (SKIP_DIRS.has(item.name) || item.name.startsWith('.')) continue
+        const full = join(dirReal, item.name)
+        try {
+          const real = realpathSync(full)
+          if (!isWithinRoots(real, roots)) continue
+          if (statSync(real).isDirectory()) {
+            entries.push({ name: item.name, path: real, kind: 'dir' })
+          }
+        } catch { /* Skip unreadable entries */ }
+        if (entries.length >= 200) break
+      }
+      entries.sort((a, b) => a.name.localeCompare(b.name))
+      const up = dirname(dirReal)
+      const parent = up !== dirReal && isWithinRoots(up, roots) ? up : (roots.length > 1 ? '' : null)
+      send(ws, { type: 'fs.list.result', request_id, path: dirReal, parent, entries })
+    } catch (error) {
+      send(ws, {
+        type: 'fs.list.result',
+        request_id,
+        path: requestedPath ?? '',
+        parent: null,
+        entries: [],
+        error: error instanceof Error ? error.message : 'Failed to list directory',
+      })
+    }
   }
 
   function execute(ws: WebSocket, request: RunStart) {
@@ -155,7 +212,14 @@ function connectAgent(config: ResolvedAgent, changed: () => void, log: (message:
         if (binary) throw new Error('Expected a text frame')
         const event = bridgeDownSchema.parse(JSON.parse(raw.toString()))
         if (event.type === 'bridge.welcome') {
-          send(ws, { type: 'bridge.hello', hostname: hostname().slice(0, 255), driver: config.driver, cwd: config.cwd, version: '0.1.0' })
+          send(ws, {
+            type: 'bridge.hello',
+            hostname: hostname().slice(0, 255),
+            driver: config.driver,
+            cwd: config.cwd,
+            allowed_roots: effectiveRoots(),
+            version: '0.3.0',
+          })
           connected = true
           failures = 0
           log(`${config.name} connected`)
@@ -166,6 +230,8 @@ function connectAgent(config: ResolvedAgent, changed: () => void, log: (message:
           tasks.get(event.run_id)?.controller.abort()
         } else if (connected && event.type === 'run.start') {
           execute(ws, event)
+        } else if (connected && event.type === 'fs.list') {
+          handleFsList(ws, event.request_id, event.path)
         }
       } catch {
         log(`${config.name} received an invalid server frame`)
