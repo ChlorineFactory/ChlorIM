@@ -1,0 +1,17 @@
+{
+  "name": "ChiorIM",
+  "short_name": "ChiorIM",
+  "description": "多文件夹 Agent 协作与即时通讯工作区",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0b1110",
+  "theme_color": "#0b1110",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

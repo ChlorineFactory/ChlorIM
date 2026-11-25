@@ -1,0 +1,25 @@
+{
+  "name": "@chiorim/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "@chiorim/shared": "workspace:*",
+    "@hono/node-server": "^1.19.0",
+    "better-sqlite3": "^12.5.0",
+    "drizzle-orm": "^0.44.7",
+    "hono": "^4.12.0",
+    "ulid": "^3.0.1",
+    "ws": "^8.18.2",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13"
+  }
+}

@@ -1,0 +1,14 @@
+node_modules
+.pnpm-store
+.svelte-kit
+data
+release
+coverage
+tests
+docs
+.git
+.github
+.env
+*.tsbuildinfo
+apps/*/dist
+packages/*/dist

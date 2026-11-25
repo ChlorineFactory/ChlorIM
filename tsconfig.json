@@ -1,0 +1,17 @@
+{
+  "files": [],
+  "references": [
+    {
+      "path": "./packages/shared"
+    },
+    {
+      "path": "./apps/server"
+    },
+    {
+      "path": "./packages/bridge"
+    },
+    {
+      "path": "./packages/mcp"
+    }
+  ]
+}

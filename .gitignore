@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.tsbuildinfo
+data/
+coverage/
+__pycache__/
+.env
+.pnpm-store/
+.svelte-kit/
+release/

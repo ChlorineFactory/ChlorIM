@@ -1,0 +1,8 @@
+{
+  "name": "@chiorim/mcp",
+  "version": "0.2.0",
+  "type": "module",
+  "bin": { "chior-mcp": "./dist/cli.js" },
+  "files": ["dist"],
+  "dependencies": { "@chiorim/shared": "workspace:*" }
+}
