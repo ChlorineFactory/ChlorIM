@@ -18,6 +18,16 @@ chior-bridge add --url '${wsOrigin}' --token 'chior_bot_<Token>' --driver 'codex
 chior-bridge service install
 chior-bridge status`
 
+  const hermesPluginSnippet = `# 在运行 Hermes Agent 的设备上安装 ChlorIM 原生平台插件
+bash packages/hermes-adapter/install.sh
+
+# 写入凭据到 ~/.hermes/.env 后启用
+export CHLORIM_URL='${origin}'
+export CHLORIM_BOT_TOKEN='chior_bot_<Token>'
+export CHLORIM_ALLOWED_ROOTS='~/Documents/Codes'
+hermes plugins enable chlorim
+hermes gateway status`
+
   const mcpSnippet = JSON.stringify({
     mcpServers: {
       chiorim: {
@@ -59,6 +69,19 @@ chior-bridge status`
       </button>
     </div>
     <pre class="guide-code">{bridgeSnippet}</pre>
+  </section>
+
+  <section class="settings-card">
+    <div class="settings-card-head row-between">
+      <div>
+        <h3><Terminal size={15} /> Hermes Gateway 原生平台插件</h3>
+        <p class="muted">将 ChlorIM 直接注册为 Hermes Agent 的原生聊天平台（支持流式回复、Cron 推送、远程目录浏览与离线排队）。</p>
+      </div>
+      <button type="button" class="button quiet compact" onclick={() => void copy(hermesPluginSnippet, 'Hermes 插件命令')}>
+        <Copy size={13} /> 复制命令
+      </button>
+    </div>
+    <pre class="guide-code">{hermesPluginSnippet}</pre>
   </section>
 
   <section class="settings-card">

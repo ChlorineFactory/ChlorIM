@@ -144,7 +144,8 @@ export function createApp(options: ServerOptions = {}): ChiorApp {
       const read = method === 'GET' && (
         ['/api/channels', '/api/search', '/api/users'].includes(path) || /^\/api\/channels\/[^/]+\/(?:messages|members)$/.test(path)
       )
-      const write = method === 'POST' && /^\/api\/channels\/[^/]+\/messages$/.test(path)
+      const write = (method === 'POST' && (path === '/api/uploads' || /^\/api\/channels\/[^/]+\/messages$/.test(path)))
+        || (method === 'PATCH' && /^\/api\/messages\/[^/]+$/.test(path))
       if (!read && !write) fail(403, 'FORBIDDEN', 'Bot token cannot access this endpoint')
       c.header('Cache-Control', 'no-store')
       return next()

@@ -62,4 +62,19 @@ chior-bridge service install
 chior-bridge status
 ```
 
+## 作为 Hermes Agent 原生聊天平台接入
+
+如果你使用 [Hermes Agent](https://github.com/NousResearch/hermes-agent)，可以直接把 ChlorIM 安装为 `hermes gateway` 的原生平台适配器（与 Telegram / Discord / Slack 平级）：
+
+```bash
+bash packages/hermes-adapter/install.sh
+export CHLORIM_URL='http://127.0.0.1:3000'
+export CHLORIM_BOT_TOKEN='chior_bot_<Token>'
+export CHLORIM_ALLOWED_ROOTS='~/Documents/Codes'
+hermes plugins enable chlorim
+hermes gateway status
+```
+
+详见 [packages/hermes-adapter/README.md](./packages/hermes-adapter/README.md)。
+
 更多接口、WebSocket 协议与环境变量说明见 [docs/BACKEND_API.md](./docs/BACKEND_API.md)。
