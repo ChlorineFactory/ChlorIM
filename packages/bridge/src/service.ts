@@ -40,7 +40,7 @@ ${args.map(arg => `    <string>${xml(arg)}</string>`).join('\n')}
 `
 }
 
-export function systemdUnit(options: ServiceTemplateOptions) {
+export function systemdUnit(options: ServiceTemplateOptions, systemScope = false) {
   const args = serviceArgs(options)
   return `[Unit]
 Description=ChiorIM Bridge Daemon
@@ -55,14 +55,18 @@ RestartSec=3
 UMask=0077
 
 [Install]
-WantedBy=default.target
+WantedBy=${systemScope ? 'multi-user.target' : 'default.target'}
 `
 }
 
 const command = (name: string, args: string[]) => execFileSync(name, args, { stdio: 'pipe' })
 const launchDomain = () => `gui/${process.getuid?.()}`
 const plistPath = () => join(homedir(), 'Library', 'LaunchAgents', label + '.plist')
-const systemdPath = () => join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'systemd', 'user', unit)
+const isRootLinux = () => process.platform === 'linux' && process.getuid?.() === 0
+const systemdPath = () => isRootLinux()
+  ? join('/etc/systemd/system', unit)
+  : join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'systemd', 'user', unit)
+const systemctlArgs = (...args: string[]) => isRootLinux() ? args : ['--user', ...args]
 function checkPlatform() {
   if (process.platform !== 'darwin' && process.platform !== 'linux') throw new Error('Service management is supported on macOS and Linux')
 }
@@ -83,12 +87,18 @@ export function installService(paths: BridgePaths) {
     try { command('launchctl', ['bootout', `${launchDomain()}/${label}`]) } catch { /* No previously loaded job. */ }
     command('launchctl', ['bootstrap', launchDomain(), path])
   } else {
+    const systemScope = isRootLinux()
     const path = systemdPath()
     const existing = existsSync(path)
-    writePrivate(path, systemdUnit(options))
-    command('systemctl', ['--user', 'daemon-reload'])
-    command('systemctl', ['--user', 'enable', '--now', unit])
-    if (existing) command('systemctl', ['--user', 'restart', unit])
+    writePrivate(path, systemdUnit(options, systemScope))
+    try {
+      command('systemctl', systemctlArgs('daemon-reload'))
+      command('systemctl', systemctlArgs('enable', '--now', unit))
+      if (existing) command('systemctl', systemctlArgs('restart', unit))
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      throw new Error(`systemd service install failed (${msg}). On headless Linux servers without a user D-Bus session, run "chior-bridge start" directly or install with sudo.`)
+    }
   }
 }
 
@@ -101,9 +111,9 @@ export function uninstallService() {
     }
     rmSync(plistPath(), { force: true })
   } else {
-    command('systemctl', ['--user', 'disable', '--now', unit])
+    command('systemctl', systemctlArgs('disable', '--now', unit))
     rmSync(systemdPath(), { force: true })
-    command('systemctl', ['--user', 'daemon-reload'])
+    command('systemctl', systemctlArgs('daemon-reload'))
   }
 }
 
@@ -114,8 +124,8 @@ export function restartService() {
     return true
   }
   if (process.platform === 'linux') {
-    try { command('systemctl', ['--user', 'is-enabled', unit]) } catch { return false }
-    command('systemctl', ['--user', 'restart', unit])
+    try { command('systemctl', systemctlArgs('is-enabled', unit)) } catch { return false }
+    command('systemctl', systemctlArgs('restart', unit))
     return true
   }
   return false

@@ -1,7 +1,7 @@
 <script lang="ts">
   import {
     Bookmark, Brain, Check, CheckCircle2, ChevronDown, Circle, Clock, CornerUpLeft, MessageSquare,
-    Pencil, Pin, PinOff, Quote, RotateCcw, SmilePlus, Square, Trash2, Webhook, Wrench, X,
+    MoreHorizontal, Pencil, Pin, PinOff, Quote, RotateCcw, SmilePlus, Square, Trash2, Webhook, Wrench, X,
   } from 'lucide-svelte'
   import type { Attachment as FileAttachment, Message, User } from '@chiorim/shared'
   import { messagePatchSchema, messageSchema } from '@chiorim/shared'
@@ -38,11 +38,12 @@
 
   let editing = $state(false)
   let emojiOpen = $state(false)
+  let mobileActions = $state(false)
   let content = $state('')
   let busy = $state(false)
   let error = $state('')
 
-  function beginEdit() { content = message.content; error = ''; editing = true }
+  function beginEdit() { mobileActions = false; content = message.content; error = ''; editing = true }
 
   async function action(task: () => Promise<unknown>) {
     busy = true
@@ -86,16 +87,23 @@
 
   function react(emoji: string) {
     emojiOpen = false
+    mobileActions = false
     return action(() => workspace.react(message.id, emoji))
   }
 </script>
 
-<article class="message-row" data-message-id={message.id} class:grouped={group} class:thread-root={threadRoot} class:highlighted>
+<article class="message-row" data-message-id={message.id} class:grouped={group} class:thread-root={threadRoot} class:highlighted class:actions-open={mobileActions}>
   <div class="message-gutter">
     {#if !group}
       <Avatar user={author} size={34} />
     {:else}
       <time class="group-time" datetime={new Date(message.created_at).toISOString()} title={formatStamp(message.created_at)}>{formatTime(message.created_at)}</time>
+      {#if !editing}
+        <button type="button" class="icon-button mobile-action-toggle grouped-toggle" class:active-icon={mobileActions}
+          aria-label="消息操作" title="更多操作" onclick={() => { mobileActions = !mobileActions }}>
+          <MoreHorizontal size={14} />
+        </button>
+      {/if}
     {/if}
   </div>
 
@@ -128,6 +136,12 @@
           <button type="button" class="board-chip" class:done={message.board_status === 'done'}
             onclick={() => action(() => workspace.setBoardStatus(message, message.board_status === 'done' ? 'open' : 'done'))}>
             {#if message.board_status === 'done'}<CheckCircle2 size={12} /> 已处理{:else}<Circle size={12} /> 待处理{/if}
+          </button>
+        {/if}
+        {#if !editing}
+          <button type="button" class="icon-button mobile-action-toggle" class:active-icon={mobileActions}
+            aria-label="消息操作" title="更多操作" onclick={() => { mobileActions = !mobileActions }}>
+            <MoreHorizontal size={15} />
           </button>
         {/if}
       </header>
@@ -248,27 +262,28 @@
   </div>
 
   {#if !editing}
-    <div class="message-actions">
+    <div class="message-actions" class:mobile-open={mobileActions}>
       <button class="icon-button quick-emoji" type="button" title="👍" onclick={() => void react('👍')}>👍</button>
-      <button class="icon-button" type="button" title="添加回应" aria-label="添加回应" onclick={() => { emojiOpen = !emojiOpen }}>
+      <button class="icon-button" type="button" title="添加回应" aria-label="添加回应" onclick={() => { emojiOpen = !emojiOpen; mobileActions = false }}>
         <SmilePlus size={14} />
       </button>
       <button class="icon-button" type="button" title="引用回复" aria-label="引用回复"
-        onclick={() => workspace.setReply(message.channel_id, message.thread_root_id, message)}>
+        onclick={() => { mobileActions = false; workspace.setReply(message.channel_id, message.thread_root_id, message) }}>
         <Quote size={14} />
       </button>
       {#if !message.thread_root_id && !threadRoot}
-        <button class="icon-button" type="button" title="回复进 Thread" aria-label="回复进 Thread" onclick={() => workspace.openThread(message.id)}>
+        <button class="icon-button" type="button" title="回复进 Thread" aria-label="回复进 Thread"
+          onclick={() => { mobileActions = false; workspace.openThread(message.id) }}>
           <CornerUpLeft size={14} />
         </button>
       {/if}
       <button class="icon-button" class:bookmarked type="button" title={bookmarked ? '取消收藏' : '收藏消息'} aria-label={bookmarked ? '取消收藏' : '收藏消息'}
-        onclick={() => action(() => workspace.toggleBookmark(message))}>
+        onclick={() => { mobileActions = false; void action(() => workspace.toggleBookmark(message)) }}>
         <Bookmark size={14} />
       </button>
       {#if isBotMsg && message.status !== 'streaming' && !author.disabled}
         <button class="icon-button" type="button" title="重新生成" aria-label="重新生成"
-          onclick={() => action(() => workspace.regenerate(message.id))}>
+          onclick={() => { mobileActions = false; void action(() => workspace.regenerate(message.id)) }}>
           <RotateCcw size={14} />
         </button>
       {/if}
@@ -278,12 +293,14 @@
         </button>
       {/if}
       {#if canPin}
-        <button class="icon-button" type="button" title={pinned ? '取消置顶' : '置顶消息'} aria-label={pinned ? '取消置顶' : '置顶消息'} onclick={togglePin}>
+        <button class="icon-button" type="button" title={pinned ? '取消置顶' : '置顶消息'} aria-label={pinned ? '取消置顶' : '置顶消息'}
+          onclick={() => { mobileActions = false; void togglePin() }}>
           {#if pinned}<PinOff size={14} />{:else}<Pin size={14} />{/if}
         </button>
       {/if}
       {#if canEdit}
-        <button class="icon-button danger-on-hover" type="button" title="删除消息" aria-label="删除消息" onclick={() => void deleteMessage()}>
+        <button class="icon-button danger-on-hover" type="button" title="删除消息" aria-label="删除消息"
+          onclick={() => { mobileActions = false; void deleteMessage() }}>
           <Trash2 size={14} />
         </button>
       {/if}

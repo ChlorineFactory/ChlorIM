@@ -797,7 +797,7 @@ dialog.search-dialog { width: min(600px, calc(100vw - 24px)); max-height: min(74
 .toast.success svg:first-child { color: var(--green-text); }
 .toast.error { border-color: rgba(220, 38, 38, 0.45); color: var(--red-text); }
 
-.mobile-only, .mobile-panel-icon, .drawer-shade { display: none; }
+.mobile-only, .mobile-panel-icon, .drawer-shade, .mobile-action-toggle { display: none; }
 
 @media (max-width: 1180px) and (min-width: 901px) {
   .discord-shell { grid-template-columns: 244px minmax(0, 1fr) 224px; }
@@ -829,11 +829,23 @@ dialog.search-dialog { width: min(600px, calc(100vw - 24px)); max-height: min(74
   .drawer-shade.left-shade { display: block; position: fixed; inset: 0; z-index: 11; background: rgba(0, 0, 0, 0.55); }
   .mobile-only { display: inline-grid; }
   .chat-header { padding-inline: 8px; gap: 6px; }
+  .channel-title p { display: none; }
+  .header-dir-pill { max-width: 120px; }
   .message-row { grid-template-columns: 32px minmax(0, 1fr); padding-inline: 11px; gap: 8px; }
   .composer-wrap { padding-inline: 9px; }
 }
-@media (hover: none) {
-  .message-actions { opacity: 1; pointer-events: auto; top: 4px; right: 4px; background: none; border: none; box-shadow: none; }
+@media (hover: none), (max-width: 680px) {
+  .mobile-action-toggle { display: inline-grid; margin-left: auto; width: 24px; height: 22px; color: var(--dim); }
+  .grouped-toggle { margin: 1px auto 0; }
+  .message-row.grouped .group-time { display: none; }
+  .message-actions {
+    display: none; position: static; grid-column: 2; flex-wrap: wrap; justify-self: start;
+    margin-top: 6px; opacity: 1; pointer-events: auto;
+    padding: 3px; border-radius: 7px; border: 1px solid var(--stroke-strong); background: var(--card); box-shadow: none;
+  }
+  .message-row:hover > .message-actions, .message-row:focus-within > .message-actions { opacity: 1; pointer-events: auto; }
+  .message-actions.mobile-open { display: flex; }
+  .message-actions .icon-button { width: 30px; height: 28px; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }

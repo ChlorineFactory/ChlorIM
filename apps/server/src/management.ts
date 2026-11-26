@@ -79,8 +79,14 @@ export function registerManagement(app: App, services: Services, chatRoutes: Ret
     return bot
   }
 
-  function credentials(url: string, token: string, driver: BotRow['driver_hint'], username: string) {
-    const origin = bridgePublicUrl ?? new URL(url).origin.replace(/^http/, 'ws')
+  function credentials(request: { url: string; header(name: string): string | undefined }, token: string, driver: BotRow['driver_hint'], username: string) {
+    let origin = bridgePublicUrl
+    if (!origin) {
+      const parsed = new URL(request.url)
+      const proto = request.header('X-Forwarded-Proto')?.split(',')[0]?.trim() || parsed.protocol.replace(/:$/, '')
+      const host = request.header('X-Forwarded-Host')?.split(',')[0]?.trim() || request.header('Host')?.trim() || parsed.host
+      origin = `${proto === 'https' ? 'wss' : 'ws'}://${host}`
+    }
     return { bot_token: token, connect_command: `chior-bridge add --url ${quote(origin)} --token ${quote(token)} --driver ${quote(driver ?? 'codex')} --name ${quote(username)}` }
   }
 
@@ -142,7 +148,7 @@ export function registerManagement(app: App, services: Services, chatRoutes: Ret
     realtime.memberUpdated(bot.user_id)
     for (const id of new Set(joined)) chat.notifyChannel(id)
     if (token) c.header('Cache-Control', 'no-store')
-    return c.json({ ...botDto(bot), ...(token ? credentials(c.req.url, token, bot.driver_hint, username) : {}) }, 201)
+    return c.json({ ...botDto(bot), ...(token ? credentials(c.req, token, bot.driver_hint, username) : {}) }, 201)
   })
   app.patch('/api/bots/:id', async c => {
     const { avatar_url, display_name, bio, disabled, ...settings } = await body(c, botPatchSchema)
@@ -169,7 +175,7 @@ export function registerManagement(app: App, services: Services, chatRoutes: Ret
     engine.cancelBot(bot.user_id)
     realtime.closeBridge(bot.user_id, 'Bridge credentials changed')
     c.header('Cache-Control', 'no-store')
-    return c.json(credentials(c.req.url, token, bot.driver_hint, botDto(bot).user.username))
+    return c.json(credentials(c.req, token, bot.driver_hint, botDto(bot).user.username))
   })
   app.delete('/api/bots/:id', c => {
     const bot = manageBot(c.req.param('id'), c.get('user'))

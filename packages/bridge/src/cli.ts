@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process'
-import { appendFileSync, mkdirSync, readFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { Command } from 'commander'
 import { defaultConfig, pathsFor, readConfig, saveConfig, agentSchema } from './config.js'
 import { daemonPid, reloadDaemon, startDaemon } from './daemon.js'
@@ -68,18 +70,49 @@ program.command('run').action(() => {
   process.once('SIGINT', clear)
   process.once('SIGTERM', clear)
 })
+program.command('start').description('Start Bridge daemon in the background (works without systemd)').action(() => {
+  const locations = paths()
+  const existing = daemonPid(locations.pid)
+  if (existing) {
+    console.log(`Bridge already running (PID ${existing})`)
+    return
+  }
+  const config = readConfig(locations.config, true)
+  saveConfig(locations.config, config)
+  mkdirSync(locations.logs, { recursive: true, mode: 0o700 })
+  const outFd = openSync(locations.log, 'a', 0o600)
+  const execPath = realpathSync(process.execPath)
+  const isStandalone = import.meta.url.includes('/$bunfs/') || !existsSync(resolve(fileURLToPath(import.meta.url), '../cli.js'))
+  const args = [
+    ...(isStandalone ? [] : [resolve(fileURLToPath(import.meta.url), '../cli.js')]),
+    '--config', locations.config, 'run',
+  ]
+  const child = spawn(execPath, args, { detached: true, stdio: ['ignore', outFd, outFd] })
+  child.unref()
+  console.log(`Bridge started in background (PID ${child.pid})`)
+})
+program.command('stop').description('Stop background Bridge daemon').action(() => {
+  const pid = daemonPid(paths().pid)
+  if (!pid) {
+    console.log('Bridge is not running')
+    return
+  }
+  process.kill(pid, 'SIGTERM')
+  console.log(`Stopped Bridge (PID ${pid})`)
+})
 program.command('status').action(() => {
   const { config, pid, status } = paths()
   const current = daemonPid(pid)
   const agents = readConfig(config, true).agents
-  let running = { pid: 0, agents: [] as { name: string; connected: boolean; cwd: string; active_tasks: number }[] }
+  let running = { pid: 0, agents: [] as { name: string; connected: boolean; cwd: string; active_tasks: number; last_error?: string }[] }
   if (current) {
     try { running = JSON.parse(readFileSync(status, 'utf8')) as typeof running } catch { /* The daemon is starting. */ }
   }
   console.log(current ? `Bridge running (PID ${current})` : 'Bridge stopped')
   for (const agent of agents) {
     const state = running.pid === current ? running.agents.find(item => item.name === agent.name) : undefined
-    console.log(`${agent.name}\t${agent.driver}\t${state?.connected ? 'connected' : 'offline'}\t${state?.cwd ?? agent.cwd ?? '-'}\t${state?.active_tasks ?? 0} active`)
+    const err = state?.last_error ? `\terror: ${state.last_error}` : ''
+    console.log(`${agent.name}\t${agent.driver}\t${state?.connected ? 'connected' : 'offline'}\t${state?.cwd ?? agent.cwd ?? '-'}\t${state?.active_tasks ?? 0} active${err}`)
   }
 })
 program.command('logs').option('-f, --follow').action(async ({ follow }: { follow?: boolean }) => {

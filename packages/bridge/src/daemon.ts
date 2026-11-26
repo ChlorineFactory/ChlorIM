@@ -11,7 +11,7 @@ import type { BridgePaths } from './config.js'
 import { drivers } from './drivers.js'
 
 type ResolvedAgent = ReturnType<typeof resolvedAgent>
-type Status = { name: string; driver: string; cwd: string; connected: boolean; active_tasks: number }
+type Status = { name: string; driver: string; cwd: string; connected: boolean; active_tasks: number; last_error?: string }
 const CHECK_INTERVAL = 10_000
 const HEARTBEAT_TIMEOUT = 60_000
 
@@ -63,6 +63,7 @@ function connectAgent(config: ResolvedAgent, changed: () => void, log: (message:
   const tasks = new Map<string, { controller: AbortController; promise: Promise<unknown> }>()
   let stopped = false
   let connected = false
+  let lastError: string | undefined
   let socket: WebSocket | undefined
   let timer: NodeJS.Timeout | undefined
   let failures = 0
@@ -202,7 +203,12 @@ function connectAgent(config: ResolvedAgent, changed: () => void, log: (message:
       headers: { Authorization: `Bearer ${config.token}` }, handshakeTimeout: 10_000, maxPayload: 32 * 1024 * 1024,
     })
     socket = ws
-    ws.on('error', () => {})
+    ws.on('error', (error: Error) => {
+      if (socket !== ws || stopped) return
+      lastError = error.message || 'WebSocket connection error'
+      log(`${config.name} connection error (${url.href}): ${lastError}`)
+      changed()
+    })
     ws.on('ping', () => { activity = Date.now() })
     ws.on('pong', () => { activity = Date.now() })
     ws.on('message', (raw, binary) => {
@@ -221,6 +227,7 @@ function connectAgent(config: ResolvedAgent, changed: () => void, log: (message:
             version: '0.3.0',
           })
           connected = true
+          lastError = undefined
           failures = 0
           log(`${config.name} connected`)
           changed()
@@ -257,7 +264,7 @@ function connectAgent(config: ResolvedAgent, changed: () => void, log: (message:
   open()
   return {
     config,
-    status: (): Status => ({ name: config.name, driver: config.driver, cwd: config.cwd, connected, active_tasks: tasks.size }),
+    status: (): Status => ({ name: config.name, driver: config.driver, cwd: config.cwd, connected, active_tasks: tasks.size, ...(lastError ? { last_error: lastError } : {}) }),
     async stop() {
       stopped = true
       connected = false

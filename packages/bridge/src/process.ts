@@ -70,8 +70,12 @@ export async function* processJson(
         : `Could not start ${executable}`, { cause: spawnError })
     }
     if (result.code !== 0) {
-      // Upstream stderr may contain credentials or prompt content.
-      const detail = stderr.trim() ? ' (the process reported an error on stderr)' : ''
+      const sanitized = stderr.trim()
+        .replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]')
+        .replace(/chior_(?:bot|wh)_[a-f0-9]+/gi, '[REDACTED]')
+        .replace(/\bsk-[A-Za-z0-9_-]{12,}/g, 'sk-[REDACTED]')
+        .slice(-300)
+      const detail = sanitized ? `: ${sanitized}` : ''
       throw new Error(`${executable} exited with ${result.code ?? result.signal}${detail}`)
     }
   } finally {
