@@ -1,6 +1,6 @@
 import {
   apiErrorSchema, attachmentSchema, bookmarkListSchema, bookmarkSchema, bridgeDeviceListSchema,
-  bridgeFsListSchema, channelFileListSchema, clearedSessionsResponseSchema, localAgentStatusSchema, messagePageSchema,
+  bridgeFsListSchema, channelFileListSchema, clearedSessionsResponseSchema, fsActionResultSchema, localAgentStatusSchema, messagePageSchema,
   messageSchema, okResponseSchema, pinListSchema, reactionToggleResponseSchema, searchHitListSchema,
   sessionListSchema, sessionResponseSchema, slashCommandResponseSchema, webhookCreatedSchema, webhookListSchema,
 } from '@chiorim/shared'
@@ -155,6 +155,16 @@ export const deleteWebhook = (webhookId: string) => remove(`/webhooks/${webhookI
 
 export const listBridgeDevices = (): Promise<BridgeDevice[]> => api('/bridges', bridgeDeviceListSchema)
 export const getLocalAgentStatus = (): Promise<LocalAgentStatus> => api('/local-agents/status', localAgentStatusSchema)
+export const listHostFs = (path?: string): Promise<BridgeFsList> => {
+  const query = path ? `?path=${encodeURIComponent(path)}` : ''
+  return api(`/host/fs${query}`, bridgeFsListSchema)
+}
+export const mkdirHostFs = (path: string, name: string) =>
+  api('/host/fs/mkdir', fsActionResultSchema, 'POST', { path, name })
+export const deleteHostFs = (path: string) =>
+  api(`/host/fs?path=${encodeURIComponent(path)}`, okResponseSchema, 'DELETE')
+export const cloneHostRepo = (path: string, repo: string, dir_name?: string) =>
+  api('/host/fs/clone', fsActionResultSchema, 'POST', { path, repo, ...(dir_name?.trim() ? { dir_name: dir_name.trim() } : {}) })
 export const listBridgeFs = (botId: string, path?: string): Promise<BridgeFsList> => {
   const query = path ? `?path=${encodeURIComponent(path)}` : ''
   return api(`/bridges/${botId}/fs${query}`, bridgeFsListSchema)

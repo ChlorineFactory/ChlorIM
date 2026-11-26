@@ -188,3 +188,110 @@ test('blocks local agent creation when disabled via server option', async () => 
     mode: 'local', username: 'disabled_local', display_name: 'Disabled', driver_hint: 'codex',
   }, 400)
 })
+
+test('manages host folders (mkdir, delete, git clone) and lets local AI create channels, react, and post replies', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'chiorim-hostfs-'))
+  cleanup(() => rmSync(root, { recursive: true, force: true }))
+  const binDir = join(root, 'bin')
+  const home = join(root, 'home')
+  mkdirSync(binDir, { recursive: true })
+  mkdirSync(home, { recursive: true })
+
+  // Fake git binary to test clone URL normalization and folder creation without network access.
+  const fakeGit = join(binDir, 'git')
+  writeFileSync(fakeGit, `#!/usr/bin/env node
+const fs = require('node:fs')
+const path = require('node:path')
+const args = process.argv.slice(2)
+if (args[0] !== 'clone' || args[1] !== '--') {
+  console.error('unexpected git args: ' + args.join(' '))
+  process.exit(2)
+}
+const target = path.join(process.cwd(), args[3])
+fs.mkdirSync(target, { recursive: true })
+fs.writeFileSync(path.join(target, 'CLONED_URL'), args[2])
+`, { mode: 0o755 })
+  chmodSync(fakeGit, 0o755)
+
+  // Fake codex binary that uses injected CHIORIM_URL + CHIORIM_TOKEN to react, create a channel, and post in it.
+  const fakeCodex = join(binDir, 'codex')
+  writeFileSync(fakeCodex, `#!/usr/bin/env node
+let stdin = ''
+process.stdin.setEncoding('utf8')
+process.stdin.on('data', chunk => { stdin += chunk })
+process.stdin.on('end', async () => {
+  const base = process.env.CHIORIM_URL
+  const token = process.env.CHIORIM_TOKEN
+  const wsId = process.env.CHIORIM_WORKSPACE_ID
+  const triggerId = process.env.CHIORIM_TRIGGER_MESSAGE_ID
+  const headers = { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }
+  await fetch(base + '/api/messages/' + triggerId + '/reactions', {
+    method: 'POST', headers, body: JSON.stringify({ emoji: '👀' }),
+  })
+  const chRes = await fetch(base + '/api/channels', {
+    method: 'POST', headers, body: JSON.stringify({ type: 'public', name: 'ai-lab', workspace_id: wsId, topic: 'Created by local AI' }),
+  })
+  const ch = await chRes.json()
+  await fetch(base + '/api/channels/' + ch.id + '/messages', {
+    method: 'POST', headers, body: JSON.stringify({ content: 'Welcome to #' + ch.name }),
+  })
+  console.log(JSON.stringify({ type: 'thread.started', thread_id: 'thr_ai_ops' }))
+  console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'Created #' + ch.name } }))
+  console.log(JSON.stringify({ type: 'turn.completed' }))
+})
+`, { mode: 0o755 })
+  chmodSync(fakeCodex, 0o755)
+
+  const h = await harness({
+    localAgent: {
+      enabled: true,
+      allowedRoots: [home],
+      defaultCwd: home,
+      env: { PATH: `${binDir}${delimiter}${process.env.PATH ?? ''}` },
+    },
+  })
+  const admin = await h.person('admin')
+  const member = await h.person('member', await h.invite(admin.token))
+
+  // Host FS defaults directly into home root, supports mkdir, git clone (owner/repo shorthand), and safe delete.
+  const initial = await h.api<BridgeFsList>('GET', '/api/host/fs', admin.token)
+  expect(initial.path).toBe(realpathSync(home))
+  expect(initial.entries).toEqual([])
+
+  await h.api('POST', '/api/host/fs/mkdir', member.token, { path: home, name: 'denied' }, 403)
+  const created = await h.api<{ path: string; name: string }>('POST', '/api/host/fs/mkdir', admin.token, { path: home, name: 'my-work' }, 201)
+  expect(created).toEqual({ path: realpathSync(join(home, 'my-work')), name: 'my-work' })
+  await h.api('POST', '/api/host/fs/mkdir', admin.token, { path: home, name: 'my-work' }, 409)
+
+  // Clone shorthand owner/repo expands to https://github.com/owner/repo.git and rejects flag injection.
+  await h.api('POST', '/api/host/fs/clone', admin.token, { path: created.path, repo: '--upload-pack=evil' }, 400)
+  const cloned = await h.api<{ path: string; name: string }>('POST', '/api/host/fs/clone', admin.token, {
+    path: created.path, repo: 'ChlorineFactory/ChlorIM',
+  }, 201)
+  expect(cloned.name).toBe('ChlorIM')
+
+  // Cannot delete root directory, but can delete created folders.
+  await h.api('DELETE', `/api/host/fs?path=${encodeURIComponent(home)}`, admin.token, undefined, 400)
+  await h.api('DELETE', `/api/host/fs?path=${encodeURIComponent(created.path)}`, admin.token)
+  const afterDelete = await h.api<BridgeFsList>('GET', '/api/host/fs', admin.token)
+  expect(afterDelete.entries).toEqual([])
+
+  // Local AI bot reacts with emoji, creates a new channel, and posts in it autonomously!
+  const bot = await h.api<BotWriteResponse>('POST', '/api/bots', admin.token, {
+    mode: 'local', username: 'ops_ai', display_name: 'Ops AI', driver_hint: 'codex',
+  }, 201)
+  const general = await h.general(admin.token)
+  const trigger = await h.api<Message>('POST', `/api/channels/${general.id}/messages`, admin.token, {
+    content: '@ops_ai 帮我建一个 ai-lab 频道并打招呼',
+  }, 201)
+
+  await vi.waitFor(async () => {
+    const channels = await h.api<Channel[]>('GET', '/api/channels', admin.token)
+    const aiLab = channels.find(c => c.name === 'ai-lab')
+    expect(aiLab).toBeDefined()
+    const msgs = await h.api<{ messages: Message[] }>('GET', `/api/channels/${aiLab!.id}/messages`, admin.token)
+    expect(msgs.messages.some(m => m.content === 'Welcome to #ai-lab')).toBe(true)
+    const triggerMsg = await h.api<Message>('GET', `/api/messages/${trigger.id}`, admin.token)
+    expect(triggerMsg.reactions).toContainEqual(expect.objectContaining({ emoji: '👀', count: 1 }))
+  }, { timeout: 5000 })
+})

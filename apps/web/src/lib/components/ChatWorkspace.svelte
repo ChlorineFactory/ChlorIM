@@ -277,7 +277,7 @@
         : modal === 'channel-settings' ? `频道设置 · #${channel?.name ?? ''}`
         : modal === 'dm' ? '发起私聊' : '成员资料'}
       close={closeModal}
-      wide={['channel-settings', 'attachment'].includes(modal)}>
+      wide={['channel-settings', 'attachment', 'new-folder', 'edit-folder'].includes(modal)}>
       {#if modal === 'new-folder'}
         <WorkspaceEditor {workspace} close={closeModal} />
       {:else if modal === 'edit-folder' && editingFolder}

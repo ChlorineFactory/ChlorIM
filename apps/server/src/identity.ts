@@ -7,7 +7,7 @@ import { sha256 } from './security.js'
 export const SESSION_SECONDS = 30 * 86400
 export const botTokenPattern = /^chior_bot_[a-f0-9]{64}$/
 
-export function createIdentity(db: Database) {
+export function createIdentity(db: Database, localBotByToken?: (token: string) => string | undefined) {
   function sessionById(id: string, touch = true) {
     const now = Date.now()
     const row = db.select({ user: users, session: sessions }).from(sessions).innerJoin(users, eq(sessions.user_id, users.id))
@@ -29,9 +29,14 @@ export function createIdentity(db: Database) {
 
   function botIdentity(token?: string) {
     if (!token || !botTokenPattern.test(token)) return
-    const row = db.select({ user: users, bot: bots }).from(bots).innerJoin(users, eq(users.id, bots.user_id))
+    const row = db.select({ user: users, bot: bots }).from(bots).innerJoin(users, eq(bots.user_id, users.id))
       .where(and(eq(bots.token_hash, sha256(token)), eq(users.kind, 'bot'))).get()
     if (row) return { user: publicUser(row.user), bot: row.bot }
+    const localId = localBotByToken?.(token)
+    if (!localId) return
+    const localRow = db.select({ user: users, bot: bots }).from(bots).innerJoin(users, eq(bots.user_id, users.id))
+      .where(and(eq(bots.user_id, localId), eq(bots.mode, 'local'), eq(users.kind, 'bot'))).get()
+    if (localRow) return { user: publicUser(localRow.user), bot: localRow.bot }
   }
 
   return { identity, sessionById, botIdentity }

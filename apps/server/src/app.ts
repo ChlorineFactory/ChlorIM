@@ -74,7 +74,7 @@ export function createApp(options: ServerOptions = {}): ChiorApp {
   const uploadLimit = options.uploadLimit ?? 10 * 1024 * 1024
   const publicUploads = options.publicUploads ?? false
   const app: App = new Hono()
-  const auth = createIdentity(services.db)
+  const auth = createIdentity(services.db, services.localRunner.botIdForToken)
 
   function refreshCookie(c: Context, token: string | undefined, expiresAt: number) {
     if (token && token === getCookie(c, COOKIE) && !c.res.headers.has('Set-Cookie')) {
@@ -147,10 +147,14 @@ export function createApp(options: ServerOptions = {}): ChiorApp {
       validate()
       c.set('recheckAuth', validate)
       const read = method === 'GET' && (
-        ['/api/channels', '/api/search', '/api/users'].includes(path) || /^\/api\/channels\/[^/]+\/(?:messages|members)$/.test(path)
+        ['/api/workspaces', '/api/channels', '/api/search', '/api/users'].includes(path) || /^\/api\/channels\/[^/]+\/(?:messages|members)$/.test(path)
       )
-      const write = (method === 'POST' && (path === '/api/uploads' || /^\/api\/channels\/[^/]+\/messages$/.test(path)))
-        || (method === 'PATCH' && /^\/api\/messages\/[^/]+$/.test(path))
+      const write = (method === 'POST' && (
+        path === '/api/uploads'
+        || path === '/api/channels'
+        || /^\/api\/channels\/[^/]+\/messages$/.test(path)
+        || /^\/api\/messages\/[^/]+\/reactions$/.test(path)
+      )) || (method === 'PATCH' && /^\/api\/messages\/[^/]+$/.test(path))
       if (!read && !write) fail(403, 'FORBIDDEN', 'Bot token cannot access this endpoint')
       c.header('Cache-Control', 'no-store')
       return next()

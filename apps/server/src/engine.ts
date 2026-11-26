@@ -28,6 +28,8 @@ type Run = {
   request: RunStart
   botId: string
   channelId: string
+  workspaceId: string | null
+  triggerMessageId: string
   controller: AbortController
   bridge?: BridgeConnection
   timer?: NodeJS.Timeout
@@ -150,6 +152,9 @@ export function createEngine(db: Database, chat: ReturnType<typeof createChat>, 
       const external = await localRunner.run(bot, payload, run.controller.signal, delta => {
         run.controller.signal.throwIfAborted()
         applyDelta(run, delta)
+      }, {
+        CHIORIM_TRIGGER_MESSAGE_ID: run.triggerMessageId,
+        ...(run.workspaceId ? { CHIORIM_WORKSPACE_ID: run.workspaceId } : {}),
       })
       finish(run, 'done', undefined, external)
     } catch (error) {
@@ -189,7 +194,17 @@ export function createEngine(db: Database, chat: ReturnType<typeof createChat>, 
         content: withAttachmentNames(content.slice(0, 60_000), entry.blocks_json), created_at }
     })
     const workDir = chat.effectiveWorkDir(room)
-    const contextNotes = [room.system_context, workDir ? `Workspace directory: ${workDir}` : ''].filter(Boolean).join('\n\n')
+    const actionGuide = bot.mode === 'local'
+      ? [
+        `ChiorIM context: channel_id=${room.id}${room.workspace_id ? `, workspace_id=${room.workspace_id}` : ''}, trigger_message_id=${source.id}.`,
+        'You can interact with ChiorIM directly using $CHIORIM_URL with header "Authorization: Bearer $CHIORIM_TOKEN":',
+        '- List folder groups/channels: GET /api/workspaces, GET /api/channels',
+        '- Create channel: POST /api/channels {"type":"public"|"private"|"board","name":"...","workspace_id":"...","topic":"...","work_dir":"..."}',
+        '- Post or quote/thread reply: POST /api/channels/{channel_id}/messages {"content":"...","thread_root_id?":"...","reply_to_id?":"..."}',
+        '- React with emoji: POST /api/messages/{message_id}/reactions {"emoji":"👍"}',
+      ].join('\n')
+      : ''
+    const contextNotes = [room.system_context, workDir ? `Workspace directory: ${workDir}` : '', actionGuide].filter(Boolean).join('\n\n')
     const run: Run = {
       request: {
         type: 'run.start', run_id: randomUUID(), message_id: row.id, channel_id: room.id, thread_root_id: row.thread_root_id,
@@ -199,7 +214,8 @@ export function createEngine(db: Database, chat: ReturnType<typeof createChat>, 
         work_dir: workDir ?? undefined,
         sender: { id: sender.id, username: sender.username, display_name: sender.display_name },
       },
-      botId: bot.user_id, channelId: room.id, controller: new AbortController(), content: '', blocks: [], size: 0, history, hops: row.bot_hop_count,
+      botId: bot.user_id, channelId: room.id, workspaceId: room.workspace_id, triggerMessageId: source.id,
+      controller: new AbortController(), content: '', blocks: [], size: 0, history, hops: row.bot_hop_count,
     }
     active.set(row.id, run)
     byRunId.set(run.request.run_id, run)

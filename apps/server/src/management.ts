@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { eq, inArray, or } from 'drizzle-orm'
-import { botCreateSchema, botPatchSchema, providerCreateSchema, providerPatchSchema } from '@chiorim/shared'
+import { botCreateSchema, botPatchSchema, fsCloneSchema, fsDeleteSchema, fsMkdirSchema, providerCreateSchema, providerPatchSchema } from '@chiorim/shared'
 import type { Bot, BridgeDevice, Provider, User } from '@chiorim/shared'
 import { adminOnly } from './auth.js'
 import { publicUser } from './chat.js'
@@ -91,6 +91,23 @@ export function registerManagement(app: App, services: Services, chatRoutes: Ret
   }
 
   app.get('/api/local-agents/status', c => c.json(localRunner.status()))
+  app.get('/api/host/fs', c => c.json(localRunner.listFs(c.req.query('path') || undefined, null, true)))
+  app.post('/api/host/fs/mkdir', async c => {
+    adminOnly(c.get('user'))
+    const { path, name } = await body(c, fsMkdirSchema)
+    return c.json(localRunner.mkdir(path, name), 201)
+  })
+  app.delete('/api/host/fs', async c => {
+    adminOnly(c.get('user'))
+    const queryPath = c.req.query('path')
+    const targetPath = queryPath ? fsDeleteSchema.parse({ path: queryPath }).path : (await body(c, fsDeleteSchema)).path
+    return c.json(localRunner.removeDir(targetPath))
+  })
+  app.post('/api/host/fs/clone', async c => {
+    adminOnly(c.get('user'))
+    const { path, repo, dir_name } = await body(c, fsCloneSchema)
+    return c.json(await localRunner.cloneRepo(path, repo, dir_name), 201)
+  })
 
   app.get('/api/bridges', c => {
     const rows = db.select({ bot: bots, user: users }).from(bots)

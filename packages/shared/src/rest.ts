@@ -152,6 +152,24 @@ export const channelFileListSchema = z.array(channelFileSchema)
 export const webhookListSchema = z.array(webhookSchema)
 export const searchHitListSchema = z.array(searchHitSchema)
 export const bridgeDeviceListSchema = z.array(bridgeDeviceSchema)
+export const fsEntryNameSchema = z.string().trim().min(1).max(128)
+  .refine(value => value !== '.' && value !== '..' && !/[\\/\0]/.test(value), 'Folder name cannot contain slashes or dots')
+export const fsMkdirSchema = z.object({
+  path: z.string().trim().min(1).max(4096),
+  name: fsEntryNameSchema,
+})
+export const fsDeleteSchema = z.object({
+  path: z.string().trim().min(1).max(4096),
+})
+export const fsCloneSchema = z.object({
+  path: z.string().trim().min(1).max(4096),
+  repo: z.string().trim().min(1).max(512),
+  dir_name: fsEntryNameSchema.optional(),
+})
+export const fsActionResultSchema = z.object({
+  path: z.string(),
+  name: z.string(),
+})
 export { bridgeFsListSchema, localAgentStatusSchema }
 
 export const apiErrorSchema = z.object({

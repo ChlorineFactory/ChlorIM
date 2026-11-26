@@ -93,7 +93,7 @@ test('uses bot credentials for MCP stdio and enforces membership, endpoint restr
   await h.api('GET', `/api/channels/${general.id}/messages`, bot.bot_token, undefined, 404)
   await h.api('GET', '/api/search?channel_id=' + general.id, bot.bot_token, undefined, 404)
   await h.api('GET', '/api/auth/me', bot.bot_token, undefined, 403)
-  await h.api('POST', '/api/channels', bot.bot_token, { type: 'private', name: 'Forbidden' }, 403)
+  await h.api('POST', '/api/invites', bot.bot_token, { max_uses: 1 }, 403)
   expect((await h.api<Member[]>('GET', '/api/users', bot.bot_token)).map(member => member.id)).not.toContain(privateOnly.user.id)
 
   const child = spawn(process.execPath, ['--conditions=development', '--import', 'tsx', resolve('packages/mcp/src/cli.ts')], {
@@ -123,13 +123,21 @@ test('uses bot credentials for MCP stdio and enforces membership, endpoint restr
     .toMatchObject({ protocolVersion: '2025-11-25', capabilities: { tools: {} } })
   write({ jsonrpc: '2.0', method: 'notifications/initialized' })
   expect((await rpc('tools/list')).tools.map((tool: { name: string }) => tool.name))
-    .toEqual(['list_channels', 'read_messages', 'post_message', 'search_messages', 'list_members'])
+    .toEqual(['list_workspaces', 'list_channels', 'create_channel', 'read_messages', 'post_message', 'edit_message', 'react_message', 'search_messages', 'list_members'])
   expect((await call('list_channels')).channels.map((channel: Channel) => channel.id)).toEqual([room.id])
+  const workspaces = (await call('list_workspaces')).workspaces as { id: string }[]
+  expect(workspaces.length).toBeGreaterThanOrEqual(1)
+  const createdRoom = (await call('create_channel', { name: 'ai-created', type: 'public', workspace_id: workspaces[0].id, topic: 'From AI' })).channel as Channel
+  expect(createdRoom).toMatchObject({ name: 'ai-created', type: 'public', topic: 'From AI' })
+  const reacted = await call('react_message', { message_id: prompt.id, emoji: '👍' })
+  expect(reacted.reactions).toContainEqual(expect.objectContaining({ emoji: '👍', count: 1 }))
   const written = (await call('post_message', { channel_id: room.id, content: '@third_bot MCP post', reply_to_id: prompt.id })).message
   expect(written).toMatchObject({ author_id: bot.user_id, bot_hop_count: 1, reply_to_id: prompt.id })
+  const edited = (await call('edit_message', { message_id: written.id, content: '@third_bot MCP post (edited)' })).message
+  expect(edited.content).toBe('@third_bot MCP post (edited)')
   const page = await call('read_messages', { channel_id: room.id, limit: 10 })
   expect(page.messages).toEqual([
-    expect.objectContaining({ author_id: third.user_id, bot_hop_count: 2 }), expect.objectContaining({ id: written.id }), prompt,
+    expect.objectContaining({ author_id: third.user_id, bot_hop_count: 2 }), expect.objectContaining({ id: written.id }), expect.objectContaining({ id: prompt.id }),
   ])
   expect((await call('search_messages', { q: 'MCP post' })).hits).toMatchObject([{ id: written.id }])
   expect((await call('list_members', { channel_id: room.id })).members).toHaveLength(3)

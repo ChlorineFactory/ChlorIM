@@ -32,8 +32,14 @@ function cookieToken(request: IncomingMessage) {
 type ChiorServer = OpenDatabase & { app: App; server: Server; close(): Promise<void> }
 
 export function createChiorServer(options: ServerOptions = {}): ChiorServer {
-  const { app, identity, sessionById, botIdentity, allowedOrigin, sqlite, db, chat, engine, realtime } = createApp(options)
+  const { app, identity, sessionById, botIdentity, allowedOrigin, sqlite, db, chat, engine, realtime, localRunner } = createApp(options)
   const server = createServer(getRequestListener(app.fetch))
+  server.on('listening', () => {
+    const addr = server.address()
+    if (addr && typeof addr === 'object' && addr.port) {
+      localRunner.setServerUrl(`http://127.0.0.1:${addr.port}`)
+    }
+  })
   const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 })
   const live = new Map<WebSocket, boolean>()
   let closing = false

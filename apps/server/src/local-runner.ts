@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
-import { accessSync, constants, readdirSync, realpathSync, statSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
+import { accessSync, constants, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs'
 import { homedir, hostname } from 'node:os'
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
@@ -359,10 +360,51 @@ async function runHermes(
   return request.scope_key
 }
 
+function parseRepoUrl(raw: string): { url: string; defaultName: string } {
+  const value = raw.trim()
+  if (!value || value.startsWith('-') || /[\s\0]/.test(value) || value.includes('..')) {
+    throw new ApiFailure(400, 'INVALID_REPO', 'Invalid Git repository URL or owner/repo shorthand')
+  }
+  let url = value
+  if (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value)) {
+    url = `https://github.com/${value.replace(/\.git$/, '')}.git`
+  } else if (!/^https?:\/\/[A-Za-z0-9._-]+(?::\d+)?\/[A-Za-z0-9_./-]+(?:\.git)?$/.test(value)
+    && !/^git@[A-Za-z0-9._-]+:[A-Za-z0-9_./-]+(?:\.git)?$/.test(value)) {
+    throw new ApiFailure(400, 'INVALID_REPO', 'Use GitHub owner/repo, https://..., or git@host:owner/repo')
+  }
+  const tail = url.replace(/\/+$/, '').split(/[/:]/).filter(Boolean).at(-1)?.replace(/\.git$/, '') ?? ''
+  if (!tail || tail === '.' || tail === '..' || /[\\/\0]/.test(tail)) {
+    throw new ApiFailure(400, 'INVALID_REPO', 'Could not determine repository folder name')
+  }
+  return { url, defaultName: tail }
+}
+
+function sanitizeGitError(stderr: string) {
+  return stderr.trim()
+    .replace(/https?:\/\/[^@\s/]+@/gi, 'https://[REDACTED]@')
+    .replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]')
+    .slice(-300)
+}
+
 export function createLocalRunner(options: LocalAgentOptions = {}) {
   const enabled = options.enabled ?? true
   const customEnv = options.env
+  const botTokens = new Map<string, string>()
+  const tokenToBot = new Map<string, string>()
+  let loopbackUrl: string | undefined
   const mergedEnv = (): NodeJS.ProcessEnv => customEnv ? { ...process.env, ...customEnv } : { ...process.env }
+
+  function setServerUrl(url: string) { loopbackUrl = url }
+  function tokenForBot(botId: string) {
+    let token = botTokens.get(botId)
+    if (!token) {
+      token = `chior_bot_${randomBytes(32).toString('hex')}`
+      botTokens.set(botId, token)
+      tokenToBot.set(token, botId)
+    }
+    return token
+  }
+  function botIdForToken(token: string) { return tokenToBot.get(token) }
 
   function allowedRoots(): string[] {
     const raw = options.allowedRoots?.length ? options.allowedRoots : [homedir(), process.cwd()]
@@ -391,6 +433,14 @@ export function createLocalRunner(options: LocalAgentOptions = {}) {
     return allowedRoots()[0] ?? homedir()
   }
 
+  function homeDir(): string {
+    try {
+      const homeReal = realpathSync(homedir())
+      if (isWithinRoots(homeReal, allowedRoots())) return homeReal
+    } catch { /* Fall back to defaultCwd */ }
+    return defaultCwd()
+  }
+
   function resolveDir(target?: string | null, fallback?: string | null): string {
     const candidateRaw = target?.trim() || fallback?.trim() || defaultCwd()
     const candidate = expandHome(candidateRaw)
@@ -408,14 +458,14 @@ export function createLocalRunner(options: LocalAgentOptions = {}) {
     return targetReal
   }
 
-  function listFs(requestedPath?: string, botDefaultCwd?: string | null): BridgeFsList {
+  function listFs(requestedPath?: string, botDefaultCwd?: string | null, defaultToHome = false): BridgeFsList {
     if (!enabled) throw new ApiFailure(403, 'LOCAL_AGENT_DISABLED', 'Local agent execution is disabled on this server')
     const roots = allowedRoots()
-    if (!requestedPath?.trim()) {
+    if (!requestedPath?.trim() && !defaultToHome) {
       const entries = roots.map(root => ({ name: basename(root) || root, path: root, kind: 'dir' as const }))
       return { path: '', parent: null, entries }
     }
-    const dirReal = resolveDir(requestedPath, botDefaultCwd)
+    const dirReal = resolveDir(requestedPath?.trim() || (defaultToHome ? homeDir() : undefined), botDefaultCwd)
     const rawEntries = readdirSync(dirReal, { withFileTypes: true })
     const entries: BridgeFsList['entries'] = []
     for (const item of rawEntries) {
@@ -430,8 +480,91 @@ export function createLocalRunner(options: LocalAgentOptions = {}) {
     }
     entries.sort((a, b) => a.name.localeCompare(b.name))
     const up = dirname(dirReal)
-    const parent = up !== dirReal && isWithinRoots(up, roots) ? up : (roots.length > 1 ? '' : null)
+    const parent = up !== dirReal && isWithinRoots(up, roots) ? up : (!defaultToHome && roots.length > 1 ? '' : null)
     return { path: dirReal, parent, entries }
+  }
+
+  function mkdir(parentPath: string, name: string) {
+    if (!enabled) throw new ApiFailure(403, 'LOCAL_AGENT_DISABLED', 'Local agent execution is disabled on this server')
+    const trimmed = name.trim()
+    if (!trimmed || trimmed === '.' || trimmed === '..' || /[\\/\0]/.test(trimmed)) {
+      throw new ApiFailure(400, 'INVALID_NAME', 'Invalid folder name')
+    }
+    const parentReal = resolveDir(parentPath)
+    const target = join(parentReal, trimmed)
+    if (existsSync(target)) throw new ApiFailure(409, 'ALREADY_EXISTS', `Folder "${trimmed}" already exists`)
+    try {
+      mkdirSync(target, { recursive: false })
+    } catch (error) {
+      throw new ApiFailure(400, 'FS_ERROR', error instanceof Error ? error.message : 'Failed to create folder')
+    }
+    const real = realpathSync(target)
+    if (!isWithinRoots(real, allowedRoots())) {
+      rmSync(real, { recursive: true, force: true })
+      throw new ApiFailure(400, 'INVALID_PATH', 'Created folder escapes allowed local roots')
+    }
+    return { path: real, name: basename(real) }
+  }
+
+  function removeDir(targetPath: string) {
+    if (!enabled) throw new ApiFailure(403, 'LOCAL_AGENT_DISABLED', 'Local agent execution is disabled on this server')
+    const candidate = expandHome(targetPath.trim())
+    let stat: ReturnType<typeof lstatSync>
+    try { stat = lstatSync(candidate) }
+    catch { throw new ApiFailure(404, 'NOT_FOUND', 'Folder does not exist') }
+    if (stat.isSymbolicLink()) throw new ApiFailure(400, 'INVALID_PATH', 'Refusing to delete symbolic links')
+    if (!stat.isDirectory()) throw new ApiFailure(400, 'INVALID_PATH', 'Target is not a directory')
+    const targetReal = realpathSync(candidate)
+    const roots = allowedRoots()
+    if (!roots.length || !isWithinRoots(targetReal, roots)) {
+      throw new ApiFailure(400, 'INVALID_PATH', 'Folder is outside allowed local roots')
+    }
+    const protectedDirs = new Set<string>([...roots, resolve('/'), realpathSync(process.cwd())])
+    try { protectedDirs.add(realpathSync(homedir())) } catch { /* ignore */ }
+    if (protectedDirs.has(targetReal)) {
+      throw new ApiFailure(400, 'PROTECTED_PATH', 'Cannot delete a root or home directory')
+    }
+    try {
+      rmSync(targetReal, { recursive: true, force: false })
+    } catch (error) {
+      throw new ApiFailure(400, 'FS_ERROR', error instanceof Error ? error.message : 'Failed to delete folder')
+    }
+    return { ok: true as const }
+  }
+
+  async function cloneRepo(parentPath: string, repo: string, dirName?: string) {
+    if (!enabled) throw new ApiFailure(403, 'LOCAL_AGENT_DISABLED', 'Local agent execution is disabled on this server')
+    const parentReal = resolveDir(parentPath)
+    const { url, defaultName } = parseRepoUrl(repo)
+    const targetName = (dirName?.trim() || defaultName).trim()
+    if (!targetName || targetName === '.' || targetName === '..' || /[\\/\0]/.test(targetName)) {
+      throw new ApiFailure(400, 'INVALID_NAME', 'Invalid target folder name')
+    }
+    const targetPath = join(parentReal, targetName)
+    if (existsSync(targetPath)) throw new ApiFailure(409, 'ALREADY_EXISTS', `Folder "${targetName}" already exists`)
+    const env = { ...mergedEnv(), GIT_TERMINAL_PROMPT: '0' }
+    await new Promise<void>((resolveClone, rejectClone) => {
+      const child = spawn('git', ['clone', '--', url, targetName], {
+        cwd: parentReal, env, stdio: ['ignore', 'pipe', 'pipe'],
+      })
+      let stderr = ''
+      const timer = setTimeout(() => {
+        child.kill('SIGTERM')
+        rejectClone(new ApiFailure(504, 'CLONE_TIMEOUT', 'git clone timed out after 120 seconds'))
+      }, 120_000)
+      child.stderr.setEncoding('utf8').on('data', (chunk: string) => { stderr = (stderr + chunk).slice(-4096) })
+      child.once('error', (error: NodeJS.ErrnoException) => {
+        clearTimeout(timer)
+        rejectClone(new ApiFailure(500, 'GIT_UNAVAILABLE', error.code === 'ENOENT' ? 'git is not installed on this server' : 'Failed to start git'))
+      })
+      child.once('close', code => {
+        clearTimeout(timer)
+        if (code === 0) resolveClone()
+        else rejectClone(new ApiFailure(400, 'CLONE_FAILED', sanitizeGitError(stderr) || `git clone exited with code ${code}`))
+      })
+    })
+    const real = realpathSync(targetPath)
+    return { path: real, name: basename(real) }
   }
 
   let cachedDrivers: { at: number; value: LocalAgentStatus['drivers'] } | undefined
@@ -474,14 +607,22 @@ export function createLocalRunner(options: LocalAgentOptions = {}) {
     }
   }
 
-  async function run(bot: BotRow, request: RunStart, signal: AbortSignal, emit: (delta: Delta) => void): Promise<string | undefined> {
+  async function run(
+    bot: BotRow, request: RunStart, signal: AbortSignal, emit: (delta: Delta) => void,
+    extraEnv?: Record<string, string>,
+  ): Promise<string | undefined> {
     if (!enabled) throw new Error('Local agent execution is disabled on this server')
     const driver = (bot.driver_hint ?? 'codex') as LocalDriverName
     if (!(['codex', 'claude-code', 'antigravity', 'hermes'] as const).includes(driver)) {
       throw new Error(`Unsupported local agent driver: ${String(bot.driver_hint)}`)
     }
     const cwd = resolveDir(request.work_dir, bot.local_cwd)
-    const env = mergedEnv()
+    const apiEnv: Record<string, string> = {
+      ...(loopbackUrl ? { CHIORIM_URL: loopbackUrl, CHIORIM_TOKEN: tokenForBot(bot.user_id) } : {}),
+      CHIORIM_CHANNEL_ID: request.channel_id,
+      ...(extraEnv ?? {}),
+    }
+    const env = { ...mergedEnv(), ...apiEnv }
     const permission = bot.permission_mode ?? 'default'
     switch (driver) {
       case 'codex': return runCodex(request, cwd, env, permission, bot.model, signal, emit)
@@ -491,7 +632,10 @@ export function createLocalRunner(options: LocalAgentOptions = {}) {
     }
   }
 
-  return { enabled, allowedRoots, defaultCwd, resolveDir, listFs, status, runtimeMeta, run }
+  return {
+    enabled, allowedRoots, defaultCwd, homeDir, resolveDir, listFs, mkdir, removeDir, cloneRepo,
+    status, runtimeMeta, run, setServerUrl, tokenForBot, botIdForToken,
+  }
 }
 
 export type LocalRunner = ReturnType<typeof createLocalRunner>
