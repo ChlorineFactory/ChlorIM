@@ -199,7 +199,7 @@
           onpointerdown={(event) => event.preventDefault()} onclick={() => chooseMention(member)}>
           <Avatar user={member} size={26} online={member.online} status={member.presence_status} />
           <span><strong>{member.display_name}</strong><small>@{member.username}</small></span>
-          {#if member.kind === 'bot'}<span class="bot-tag">{member.bot?.mode === 'bridge' ? 'AGENT' : 'BOT'}</span>{/if}
+          {#if member.kind === 'bot'}<span class="bot-tag">{member.bot?.mode === 'provider' ? 'BOT' : 'AGENT'}</span>{/if}
         </button>
       {/each}
     </div>

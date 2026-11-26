@@ -70,10 +70,7 @@ export function createChiorServer(options: ServerOptions = {}): ChiorServer {
           realtime.clients.delete(connection)
           if (!closing && !realtime.online(userId)) realtime.publish({ type: 'presence.update', user_id: userId, online: false })
         })
-        const bridgeRuntimes = Object.fromEntries([...realtime.bridges].flatMap(([id]) => {
-          const runtime = realtime.runtime(id)
-          return runtime ? [[id, runtime]] : []
-        }))
+        const bridgeRuntimes = realtime.allRuntimes()
         writeSocket(ws, { type: 'ready', user: auth.user,
           online_user_ids: realtime.members().filter(member => member.online).map(member => member.id), bridge_runtimes: bridgeRuntimes })
         if (!alreadyOnline) realtime.publish({ type: 'presence.update', user_id: userId, online: true })

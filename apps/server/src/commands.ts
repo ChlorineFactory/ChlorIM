@@ -49,7 +49,7 @@ export function registerCommands(app: App, { db, chat, engine, realtime }: Servi
     if (prefix === '/status' && !rest.length) {
       const lines = candidates.map(({ bot, user }) => {
         const online = realtime.online(user.id)
-        const runtime = online && bot.mode === 'bridge' ? realtime.runtime(user.id) : undefined
+        const runtime = online && (bot.mode === 'bridge' || bot.mode === 'local') ? realtime.runtime(user.id) : undefined
         const detail = bot.mode === 'provider' ? bot.model : runtime && [runtime.driver, runtime.cwd].filter(Boolean).join(' · ')
         return `@${user.username} ${online ? 'online' : 'offline'}${detail ? ' — ' + detail : ''}`
       })

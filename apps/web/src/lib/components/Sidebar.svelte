@@ -235,7 +235,7 @@
               <span class="nav-room-name">{peer?.display_name ?? '私聊'}</span>
               {#if peer?.status_text}<small>{peer.status_text}</small>{/if}
             </span>
-            {#if peer?.kind === 'bot'}<span class="bot-tag">{peerMember?.bot?.mode === 'bridge' ? 'AGENT' : 'BOT'}</span>{/if}
+            {#if peer?.kind === 'bot'}<span class="bot-tag">{peerMember?.bot?.mode === 'provider' ? 'BOT' : 'AGENT'}</span>{/if}
             {#if room.unread_count > 0 && !room.muted}
               <span class="unread">{room.unread_count > 99 ? '99+' : room.unread_count}</span>
             {/if}
@@ -247,9 +247,9 @@
             <Avatar user={bot} size={24} online={bot.online} />
             <span class="dm-meta">
               <span class="nav-room-name">{bot.display_name}</span>
-              <small>{bot.bot?.mode === 'bridge' ? (bot.online ? (bot.bot.runtime_meta?.driver ?? 'bridge') : '离线') : (bot.bot?.model ?? '模型')}</small>
+              <small>{bot.bot?.mode !== 'provider' ? (bot.online ? (bot.bot?.runtime_meta?.driver ?? bot.bot?.driver_hint ?? 'agent') : '离线') : (bot.bot?.model ?? '模型')}</small>
             </span>
-            <span class="bot-tag">{bot.bot?.mode === 'bridge' ? 'AGENT' : 'BOT'}</span>
+            <span class="bot-tag">{bot.bot?.mode === 'provider' ? 'BOT' : 'AGENT'}</span>
           </button>
         {/each}
 

@@ -13,6 +13,8 @@ import { openDatabase } from './db.js'
 import type { OpenDatabase } from './db.js'
 import { createEngine } from './engine.js'
 import { ApiFailure, fail } from './errors.js'
+import { createLocalRunner } from './local-runner.js'
+import type { LocalAgentOptions, LocalRunner } from './local-runner.js'
 import { registerManagement } from './management.js'
 import { createRealtime } from './realtime.js'
 import { createSecretBox, loadSecret } from './security.js'
@@ -34,12 +36,14 @@ export type ServerOptions = {
   rateLimit?: boolean
   publicUploads?: boolean
   webDistDir?: string
+  localAgent?: LocalAgentOptions
 }
 
 export type Services = OpenDatabase & {
   realtime: ReturnType<typeof createRealtime>
   chat: ReturnType<typeof createChat>
   engine: ReturnType<typeof createEngine>
+  localRunner: LocalRunner
   secret: ReturnType<typeof createSecretBox>
   dataDir: string
   secureCookies: boolean
@@ -56,10 +60,11 @@ function createServices(options: ServerOptions): Services {
   const dataDir = resolve(options.dataDir ?? 'data')
   const secret = createSecretBox(loadSecret(dataDir, options.appSecret))
   const { db, sqlite } = openDatabase(options.database ?? resolve(dataDir, 'chiorim.db'))
-  const realtime = createRealtime(db)
+  const localRunner = createLocalRunner(options.localAgent)
+  const realtime = createRealtime(db, localRunner)
   const chat = createChat(db, realtime.publish, realtime.direct)
-  const engine = createEngine(db, chat, realtime, secret, dataDir)
-  return { db, sqlite, realtime, chat, engine, secret, dataDir, limits: createRateLimits(options.rateLimit ?? true), secureCookies: options.secureCookies ?? false, bridgePublicUrl: options.bridgePublicUrl }
+  const engine = createEngine(db, chat, realtime, secret, dataDir, localRunner)
+  return { db, sqlite, realtime, chat, engine, localRunner, secret, dataDir, limits: createRateLimits(options.rateLimit ?? true), secureCookies: options.secureCookies ?? false, bridgePublicUrl: options.bridgePublicUrl }
 }
 
 export function createApp(options: ServerOptions = {}): ChiorApp {

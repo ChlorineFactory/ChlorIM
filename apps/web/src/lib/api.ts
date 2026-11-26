@@ -1,11 +1,11 @@
 import {
   apiErrorSchema, attachmentSchema, bookmarkListSchema, bookmarkSchema, bridgeDeviceListSchema,
-  bridgeFsListSchema, channelFileListSchema, clearedSessionsResponseSchema, messagePageSchema,
+  bridgeFsListSchema, channelFileListSchema, clearedSessionsResponseSchema, localAgentStatusSchema, messagePageSchema,
   messageSchema, okResponseSchema, pinListSchema, reactionToggleResponseSchema, searchHitListSchema,
   sessionListSchema, sessionResponseSchema, slashCommandResponseSchema, webhookCreatedSchema, webhookListSchema,
 } from '@chiorim/shared'
 import type {
-  Attachment, Bookmark, BridgeDevice, BridgeFsList, ChannelFile, CreatedWebhook, Message,
+  Attachment, Bookmark, BridgeDevice, BridgeFsList, ChannelFile, CreatedWebhook, LocalAgentStatus, Message,
   ReactionSummary, SearchHit, SendMessageRequest, SessionInfo, SessionResponse, SlashCommandResponse, Webhook,
 } from '@chiorim/shared'
 import { ZodError } from 'zod'
@@ -29,6 +29,7 @@ const errors: Record<string, string> = {
   REQUEST_TOO_LARGE: '请求超过大小限制。',
   FORBIDDEN: '权限不足，无法执行此操作。',
   BOT_DISABLED: '该 Bot 已停用。',
+  LOCAL_AGENT_DISABLED: '当前服务器已关闭本机直连 Agent，请改用远程设备 Bridge 或联系管理员开启。',
 }
 
 const fieldNames: Record<string, string> = {
@@ -153,6 +154,7 @@ export const createWebhook = (channelId: string, name: string, avatar_url: strin
 export const deleteWebhook = (webhookId: string) => remove(`/webhooks/${webhookId}`)
 
 export const listBridgeDevices = (): Promise<BridgeDevice[]> => api('/bridges', bridgeDeviceListSchema)
+export const getLocalAgentStatus = (): Promise<LocalAgentStatus> => api('/local-agents/status', localAgentStatusSchema)
 export const listBridgeFs = (botId: string, path?: string): Promise<BridgeFsList> => {
   const query = path ? `?path=${encodeURIComponent(path)}` : ''
   return api(`/bridges/${botId}/fs${query}`, bridgeFsListSchema)

@@ -5,9 +5,11 @@ export const presenceStatusSchema = z.enum(['online', 'busy', 'away'])
 export const boardStatusSchema = z.enum(['open', 'done'])
 export const channelTypeSchema = z.enum(['public', 'private', 'dm', 'board'])
 export const providerTypeSchema = z.enum(['openai_compat', 'anthropic', 'gemini'])
-export const botModeSchema = z.enum(['provider', 'bridge'])
+export const botModeSchema = z.enum(['provider', 'local', 'bridge'])
 export const triggerPolicySchema = z.enum(['mention', 'always', 'dm_only'])
 export const driverSchema = z.enum(['claude-code', 'codex', 'hermes', 'antigravity', 'custom'])
+export const localDriverSchema = z.enum(['claude-code', 'codex', 'hermes', 'antigravity'])
+export const permissionModeSchema = z.enum(['readonly', 'default', 'auto'])
 export const messageStatusSchema = z.enum(['queued', 'streaming', 'done', 'aborted', 'error'])
 export const idSchema = z.string().min(1).max(128)
 export const usernameSchema = z.string().min(2).max(32).regex(/^[a-z0-9_-]+$/)
@@ -129,7 +131,25 @@ export const providerSchema = z.object({
 export const botSchema = botSummarySchema.extend({
   user: userSchema, user_id: idSchema, owner_id: idSchema, trigger_policy: triggerPolicySchema,
   provider_id: idSchema.nullable(), system_prompt: z.string(), temperature: z.number(),
-  context_limit: z.number().int(), created_at: timestampSchema, online: z.boolean(),
+  context_limit: z.number().int(), local_cwd: workDirSchema.nullable().optional().default(null),
+  permission_mode: permissionModeSchema.optional().default('default'),
+  created_at: timestampSchema, online: z.boolean(),
+})
+export const localAgentDriverStatusSchema = z.object({
+  available: z.boolean(),
+  binary: z.string(),
+})
+export const localAgentStatusSchema = z.object({
+  enabled: z.boolean(),
+  hostname: z.string(),
+  default_cwd: z.string(),
+  allowed_roots: z.array(z.string()),
+  drivers: z.object({
+    codex: localAgentDriverStatusSchema,
+    'claude-code': localAgentDriverStatusSchema,
+    antigravity: localAgentDriverStatusSchema,
+    hermes: localAgentDriverStatusSchema,
+  }),
 })
 export const inviteSchema = z.object({
   code: idSchema, created_by: idSchema, max_uses: z.number().int(), used_count: z.number().int(),
@@ -172,6 +192,9 @@ export type BridgeFsEntry = z.infer<typeof bridgeFsEntrySchema>
 export type BridgeFsList = z.infer<typeof bridgeFsListSchema>
 export type BridgeDevice = z.infer<typeof bridgeDeviceSchema>
 export type DriverName = z.infer<typeof driverSchema>
+export type LocalDriverName = z.infer<typeof localDriverSchema>
+export type PermissionMode = z.infer<typeof permissionModeSchema>
+export type LocalAgentStatus = z.infer<typeof localAgentStatusSchema>
 export type Provider = z.infer<typeof providerSchema>
 export type Bot = z.infer<typeof botSchema>
 export type Invite = z.infer<typeof inviteSchema>

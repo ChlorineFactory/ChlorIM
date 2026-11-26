@@ -1,17 +1,18 @@
 <script lang="ts">
-  import { untrack } from 'svelte'
+  import { onMount, untrack } from 'svelte'
   import { FolderOpen } from 'lucide-svelte'
-  import { botCreateSchema, botPatchSchema, botSchema, botWriteResponseSchema, driverSchema } from '@chiorim/shared'
-  import type { Bot, BotWriteResponse, Channel, CreateBotRequest, DriverName, Provider, Workspace as FolderGroup } from '@chiorim/shared'
-  import { api, errorText } from '$lib/api'
+  import { botCreateSchema, botPatchSchema, botSchema, botWriteResponseSchema, driverSchema, localDriverSchema } from '@chiorim/shared'
+  import type { Bot, BotWriteResponse, Channel, CreateBotRequest, DriverName, LocalAgentStatus, LocalDriverName, PermissionMode, Provider, Workspace as FolderGroup } from '@chiorim/shared'
+  import { api, errorText, getLocalAgentStatus } from '$lib/api'
   import { shortPath } from '$lib/format'
   import type { BotTemplate } from '$lib/presets'
   import AvatarField from '$lib/components/AvatarField.svelte'
   import RoomIcon from '$lib/components/RoomIcon.svelte'
 
-  let { initial, template, providers, folders, rooms, close, saved }: {
+  let { initial, template, isAdmin = false, providers, folders, rooms, close, saved }: {
     initial?: Bot
     template?: BotTemplate
+    isAdmin?: boolean
     providers: Provider[]
     folders: FolderGroup[]
     rooms: Channel[]
@@ -19,25 +20,46 @@
     saved: (result: BotWriteResponse) => void
   } = $props()
 
-  let mode = $state<CreateBotRequest['mode']>(untrack(() => initial?.mode ?? template?.mode ?? 'provider'))
+  const defaultMode = untrack((): CreateBotRequest['mode'] => {
+    const requested = initial?.mode ?? template?.mode ?? 'provider'
+    if (!initial && requested === 'local' && !isAdmin) return 'bridge'
+    return requested
+  })
+
+  let mode = $state<CreateBotRequest['mode']>(defaultMode)
   let name = $state(untrack(() => initial?.user.display_name ?? template?.display_name ?? ''))
   let username = $state(untrack(() => initial?.user.username ?? template?.username ?? ''))
   let avatar = $state(untrack(() => initial?.user.avatar_url ?? template?.avatar_url ?? ''))
   let bio = $state(untrack(() => initial?.user.bio ?? template?.bio ?? ''))
   let trigger = $state<NonNullable<CreateBotRequest['trigger_policy']>>(untrack(() => initial?.trigger_policy ?? 'mention'))
   let provider = $state(untrack(() => initial?.provider_id ?? (providers[0]?.id ?? '')))
-  let model = $state(untrack(() => initial?.model ?? (providers[0]?.models[0] ?? '')))
+  let model = $state(untrack(() => initial?.model ?? (defaultMode === 'provider' ? (providers[0]?.models[0] ?? '') : '')))
   let prompt = $state(untrack(() => initial?.system_prompt ?? template?.system_prompt ?? ''))
   let temperature = $state<number | undefined>(untrack(() => initial?.temperature ?? 0.7))
   let context = $state<number | undefined>(untrack(() => initial?.context_limit ?? 20))
-  let driver = $state<DriverName | ''>(untrack(() => initial?.driver_hint ?? template?.driver_hint ?? ''))
+  let driver = $state<DriverName | ''>(untrack(() => initial?.driver_hint ?? template?.driver_hint ?? (defaultMode === 'local' ? 'codex' : '')))
+  let localCwd = $state(untrack(() => initial?.local_cwd ?? ''))
+  let permissionMode = $state<PermissionMode>(untrack(() => initial?.permission_mode ?? 'default'))
   let roomIds = $state<string[]>(untrack(() => rooms.filter(room => room.type === 'public').map(room => room.id)))
+  let localStatus = $state<LocalAgentStatus | null>(null)
   let error = $state('')
   let uploading = $state(false)
   let busy = $state(false)
 
+  onMount(() => {
+    void getLocalAgentStatus().then(status => { localStatus = status }).catch(() => {})
+  })
+
   const models = $derived(providers.find(item => item.id === provider)?.models ?? [])
-  const valid = $derived(mode === 'provider' ? Boolean(provider && model.trim()) : true)
+  const localDriver = $derived<LocalDriverName>((driver && driver !== 'custom' ? driver : 'codex') as LocalDriverName)
+  const localDriverInfo = $derived(localStatus?.drivers[localDriver])
+  const valid = $derived(
+    mode === 'provider'
+      ? Boolean(provider && model.trim())
+      : mode === 'local'
+        ? Boolean(isAdmin && (!localStatus || localStatus.enabled))
+        : true
+  )
 
   const groupedRooms = $derived.by(() => {
     const known = new Set(folders.map(item => item.id))
@@ -46,6 +68,15 @@
       items: rooms.filter(room => room.workspace_id === folder.id || (index === 0 && (!room.workspace_id || !known.has(room.workspace_id)))),
     })).filter(group => group.items.length > 0)
   })
+
+  function onModeChange() {
+    if (mode === 'local') {
+      if (!driver || driver === 'custom') driver = 'codex'
+      if (!initial && providers.some(p => p.models.includes(model))) model = ''
+    } else if (mode === 'provider' && !model && providers.length) {
+      model = providers.find(item => item.id === provider)?.models[0] ?? ''
+    }
+  }
 
   function groupCheckedState(items: Channel[]) {
     const selected = items.filter(item => roomIds.includes(item.id)).length
@@ -67,7 +98,14 @@
       const profile = { display_name: name, avatar_url: avatar.trim() || null, bio, trigger_policy: trigger }
       const settings = mode === 'provider'
         ? { provider_id: provider, model, system_prompt: prompt, temperature, context_limit: context }
-        : { driver_hint: driver || null }
+        : mode === 'local'
+          ? {
+            driver_hint: localDriver,
+            model: model.trim() || null,
+            local_cwd: localCwd.trim() || null,
+            permission_mode: permissionMode,
+          }
+          : { driver_hint: driver || null }
       const bot = initial
         ? await api('/bots/' + initial.user_id, botSchema, 'PATCH', botPatchSchema.parse({ ...profile, ...settings }))
         : await api('/bots', botWriteResponseSchema, 'POST', botCreateSchema.parse({
@@ -82,9 +120,12 @@
   <h3>{initial ? '编辑 ' + initial.user.display_name : template ? `创建 · ${template.label}` : '创建 Bot'}</h3>
 
   <label>模式
-    <select bind:value={mode} disabled={Boolean(initial)}>
+    <select bind:value={mode} disabled={Boolean(initial)} onchange={onModeChange}>
+      <option value="local" disabled={!isAdmin || Boolean(localStatus && !localStatus.enabled)}>
+        本机直连 Agent（免装 Bridge，直接调用服务器本机 CLI）{!isAdmin ? ' · 仅管理员' : localStatus && !localStatus.enabled ? ' · 已关闭' : ''}
+      </option>
+      <option value="bridge">远程设备 Agent（通过 chior-bridge / Hermes 插件从其他设备接入）</option>
       <option value="provider">托管模型 Bot（通过 Provider API 调用）</option>
-      <option value="bridge">本地 Agent Bot（通过 chior-bridge 后台服务接入）</option>
     </select>
   </label>
 
@@ -125,6 +166,46 @@
       <label>Temperature<input type="number" bind:value={temperature} min="0" max="2" step="0.01" required /></label>
       <label>上下文条数<input type="number" bind:value={context} min="1" max="100" step="1" required /></label>
     </div>
+  {:else if mode === 'local'}
+    <div class="form-row two">
+      <label>本机 CLI 驱动
+        <select bind:value={driver}>
+          {#each localDriverSchema.options as item}
+            {@const info = localStatus?.drivers[item]}
+            <option value={item}>
+              {item}{info ? (info.available ? ' · ✓ 已就绪' : ` · 未检测到 ${info.binary}`) : ''}
+            </option>
+          {/each}
+        </select>
+      </label>
+      <label>执行权限模式
+        <select bind:value={permissionMode}>
+          <option value="default">default（默认工作区权限）</option>
+          <option value="auto">auto（自动批准编辑与命令）</option>
+          <option value="readonly">readonly（只读分析，禁止写入）</option>
+        </select>
+      </label>
+    </div>
+
+    {#if localStatus && localDriverInfo && !localDriverInfo.available}
+      <p class="form-error" role="status">
+        当前服务器未在 PATH 中检测到 <code>{localDriverInfo.binary}</code>。如果 ChlorIM 运行在 Docker 容器中，或 Agent 在另一台电脑上，请改选上方的「远程设备 Agent」。
+      </p>
+    {:else if localStatus}
+      <p class="muted">
+        服务端将直接在 <code>{localStatus.hostname}</code> 本机执行 <code>{localDriverInfo?.binary ?? localDriver}</code>，无需安装 <code>chior-bridge</code>。
+      </p>
+    {/if}
+
+    <div class="form-row two">
+      <label>默认工作目录（可选）
+        <input bind:value={localCwd} maxlength={4096} spellcheck={false}
+          placeholder={localStatus?.default_cwd ?? '留空使用服务端默认目录'} />
+      </label>
+      <label>指定模型（可选）
+        <input bind:value={model} maxlength={256} spellcheck={false} placeholder="留空使用 CLI 默认模型" />
+      </label>
+    </div>
   {:else}
     <label>驱动类型
       <select bind:value={driver}>
@@ -132,6 +213,7 @@
         {#each driverSchema.options as item}<option value={item}>{item}</option>{/each}
       </select>
     </label>
+    <p class="muted">创建后会生成一次性 Token 与 <code>chior-bridge</code> 连接命令，适合接入其他电脑或 Docker 宿主机上的 Agent。</p>
   {/if}
 
   {#if !initial && rooms.length}

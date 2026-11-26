@@ -6,6 +6,7 @@ import type { createChat } from './chat.js'
 import { bots, botSessions, channels, messages, providers, queuedRuns, users } from './db.js'
 import type { BotRow, ChannelRow, Database, MessageRow } from './db.js'
 import { fail } from './errors.js'
+import type { LocalRunner } from './local-runner.js'
 import { providerError, runProvider } from './providers.js'
 import { writeSocket } from './realtime.js'
 import type { BridgeConnection, createRealtime } from './realtime.js'
@@ -39,7 +40,7 @@ type Run = {
 }
 
 export function createEngine(db: Database, chat: ReturnType<typeof createChat>, realtime: ReturnType<typeof createRealtime>,
-  secret: ReturnType<typeof createSecretBox>, dataDir: string) {
+  secret: ReturnType<typeof createSecretBox>, dataDir: string, localRunner?: LocalRunner) {
   const active = new Map<string, Run>()
   const byRunId = new Map<string, Run>()
   const queues = new Map<string, Run[]>()
@@ -137,6 +138,27 @@ export function createEngine(db: Database, chat: ReturnType<typeof createChat>, 
     }
   }
 
+  async function runLocal(run: Run, bot: BotRow) {
+    try {
+      if (!localRunner?.enabled) return finish(run, 'error', 'Local agent execution is disabled on this server')
+      const session = db.select().from(botSessions).where(and(
+        eq(botSessions.bot_id, run.botId), eq(botSessions.scope_key, run.request.scope_key),
+      )).get()
+      const payload = { ...run.request, external_session_id: session?.external_session_id }
+      run.history = []
+      run.request.context = []
+      const external = await localRunner.run(bot, payload, run.controller.signal, delta => {
+        run.controller.signal.throwIfAborted()
+        applyDelta(run, delta)
+      })
+      finish(run, 'done', undefined, external)
+    } catch (error) {
+      if (!run.controller.signal.aborted) {
+        finish(run, 'error', ((error instanceof Error ? error.message : '') || 'Local agent execution failed').slice(0, 4000))
+      }
+    }
+  }
+
   function start(run?: Run) {
     if (!run || closed || run.timer || active.get(run.request.message_id) !== run) return
     const target = chat.memberBots(run.channelId).find(({ user }) => user.id === run.botId && !user.disabled)
@@ -144,6 +166,7 @@ export function createEngine(db: Database, chat: ReturnType<typeof createChat>, 
     const { bot } = target
     run.timer = setTimeout(() => finish(run, 'error', 'Bot run timed out'), TIMEOUT)
     if (bot.mode === 'provider') { void stream(run, bot); return }
+    if (bot.mode === 'local') { void runLocal(run, bot); return }
     const bridge = realtime.bridges.get(run.botId)
     if (!bridge?.runtime) return finish(run, 'error', 'Bot is offline. Check the local chior-bridge service.')
     const session = db.select().from(botSessions).where(and(

@@ -5,7 +5,7 @@ import type SQLite from 'better-sqlite3'
 import type { BetterSQLite3Database, drizzle as BetterDrizzle } from 'drizzle-orm/better-sqlite3'
 import { index, integer, primaryKey, real, sqliteTable, text } from 'drizzle-orm/sqlite-core'
 import type { AnySQLiteColumn } from 'drizzle-orm/sqlite-core'
-import type { BoardStatus, BridgeRuntime, DriverName, MessageBlock, PresenceStatus } from '@chiorim/shared'
+import type { BoardStatus, BridgeRuntime, DriverName, MessageBlock, PermissionMode, PresenceStatus } from '@chiorim/shared'
 
 export const users = sqliteTable('users', {
   id: text().primaryKey(), kind: text({ enum: ['human', 'bot'] }).notNull(),
@@ -36,13 +36,15 @@ export const providers = sqliteTable('providers', {
 })
 export const bots = sqliteTable('bots', {
   user_id: text().primaryKey().references(() => users.id, { onDelete: 'cascade' }),
-  mode: text({ enum: ['provider', 'bridge'] }).notNull(),
+  mode: text({ enum: ['provider', 'local', 'bridge'] }).notNull(),
   owner_id: text().notNull().references(() => users.id),
   trigger_policy: text({ enum: ['mention', 'always', 'dm_only'] }).notNull().default('mention'),
   provider_id: text().references(() => providers.id, { onDelete: 'set null' }),
   model: text(), system_prompt: text().notNull().default(''), temperature: real().notNull().default(0.7),
   context_limit: integer().notNull().default(20), token_hash: text().unique(),
   driver_hint: text().$type<DriverName>(), runtime_meta_json: text({ mode: 'json' }).$type<BridgeRuntime>(),
+  local_cwd: text(),
+  permission_mode: text({ enum: ['readonly', 'default', 'auto'] }).$type<PermissionMode>().notNull().default('default'),
   created_at: integer().notNull(),
 })
 export const workspaces = sqliteTable('workspaces', {
@@ -264,6 +266,28 @@ CREATE TABLE queued_runs (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX queued_runs_bot ON queued_runs(bot_id, created_at);
+`, `
+CREATE TABLE bots_v5 (
+  user_id TEXT PRIMARY KEY NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  mode TEXT NOT NULL CHECK(mode IN ('provider','local','bridge')),
+  owner_id TEXT NOT NULL REFERENCES users(id),
+  trigger_policy TEXT NOT NULL DEFAULT 'mention' CHECK(trigger_policy IN ('mention','always','dm_only')),
+  provider_id TEXT REFERENCES providers(id) ON DELETE SET NULL,
+  model TEXT,
+  system_prompt TEXT NOT NULL DEFAULT '',
+  temperature REAL NOT NULL DEFAULT 0.7,
+  context_limit INTEGER NOT NULL DEFAULT 20,
+  token_hash TEXT UNIQUE,
+  driver_hint TEXT,
+  runtime_meta_json TEXT,
+  local_cwd TEXT,
+  permission_mode TEXT NOT NULL DEFAULT 'default' CHECK(permission_mode IN ('readonly','default','auto')),
+  created_at INTEGER NOT NULL
+);
+INSERT INTO bots_v5 (user_id, mode, owner_id, trigger_policy, provider_id, model, system_prompt, temperature, context_limit, token_hash, driver_hint, runtime_meta_json, created_at)
+  SELECT user_id, mode, owner_id, trigger_policy, provider_id, model, system_prompt, temperature, context_limit, token_hash, driver_hint, runtime_meta_json, created_at FROM bots;
+DROP TABLE bots;
+ALTER TABLE bots_v5 RENAME TO bots;
 `]
 
 export type Database = BetterSQLite3Database
@@ -305,23 +329,35 @@ export function openDatabase(filename: string): OpenDatabase {
     sqlite.pragma('cache_size = -8000')
     sqlite.pragma('temp_store = MEMORY')
     sqlite.pragma('journal_size_limit = 8388608')
-    sqlite.transaction(() => {
-      const version = sqlite.pragma('user_version', { simple: true }) as number
-      if (version > migrations.length) throw new Error('Database schema is newer than this server')
-      migrations.slice(version).forEach(migration => sqlite.exec(migration))
-      sqlite.pragma(`user_version = ${migrations.length}`)
-      sqlite.prepare("UPDATE messages SET status='error', error_message='Server restarted during the run', updated_at=? WHERE status='streaming' AND id NOT IN (SELECT message_id FROM queued_runs)").run(Date.now())
-      sqlite.prepare('UPDATE bots SET runtime_meta_json=NULL WHERE runtime_meta_json IS NOT NULL').run()
-      const orphan = sqlite.prepare("SELECT id, created_by, created_at FROM channels WHERE type <> 'dm' AND workspace_id IS NULL LIMIT 1").get() as { id: string; created_by: string; created_at: number } | undefined
-      if (orphan) {
-        const existing = sqlite.prepare('SELECT id FROM workspaces ORDER BY created_at LIMIT 1').get() as { id: string } | undefined
-        const wsId = existing?.id ?? 'default-workspace'
-        if (!existing) {
-          sqlite.prepare("INSERT INTO workspaces (id, name, icon, color, work_dir, description, created_by, created_at) VALUES (?, '客厅', 'CH', '#1e3a34', NULL, '', ?, ?)").run(wsId, orphan.created_by, orphan.created_at)
+    const currentVersion = sqlite.pragma('user_version', { simple: true }) as number
+    if (currentVersion > migrations.length) throw new Error('Database schema is newer than this server')
+    const needsMigration = currentVersion < migrations.length
+    if (needsMigration) sqlite.pragma('foreign_keys = OFF')
+    try {
+      sqlite.transaction(() => {
+        const version = sqlite.pragma('user_version', { simple: true }) as number
+        if (version > migrations.length) throw new Error('Database schema is newer than this server')
+        migrations.slice(version).forEach(migration => sqlite.exec(migration))
+        sqlite.pragma(`user_version = ${migrations.length}`)
+        sqlite.prepare("UPDATE messages SET status='error', error_message='Server restarted during the run', updated_at=? WHERE status='streaming' AND id NOT IN (SELECT message_id FROM queued_runs)").run(Date.now())
+        sqlite.prepare('UPDATE bots SET runtime_meta_json=NULL WHERE runtime_meta_json IS NOT NULL').run()
+        const orphan = sqlite.prepare("SELECT id, created_by, created_at FROM channels WHERE type <> 'dm' AND workspace_id IS NULL LIMIT 1").get() as { id: string; created_by: string; created_at: number } | undefined
+        if (orphan) {
+          const existing = sqlite.prepare('SELECT id FROM workspaces ORDER BY created_at LIMIT 1').get() as { id: string } | undefined
+          const wsId = existing?.id ?? 'default-workspace'
+          if (!existing) {
+            sqlite.prepare("INSERT INTO workspaces (id, name, icon, color, work_dir, description, created_by, created_at) VALUES (?, '客厅', 'CH', '#1e3a34', NULL, '', ?, ?)").run(wsId, orphan.created_by, orphan.created_at)
+          }
+          sqlite.prepare("UPDATE channels SET workspace_id = ? WHERE type <> 'dm' AND workspace_id IS NULL").run(wsId)
         }
-        sqlite.prepare("UPDATE channels SET workspace_id = ? WHERE type <> 'dm' AND workspace_id IS NULL").run(wsId)
-      }
-    }).immediate()
+      }).immediate()
+    } finally {
+      if (needsMigration) sqlite.pragma('foreign_keys = ON')
+    }
+    if (needsMigration) {
+      const violations = sqlite.pragma('foreign_key_check') as unknown[]
+      if (violations.length) throw new Error('Database foreign key check failed after migration')
+    }
     return { sqlite, db: wrap(sqlite) }
   } catch (error) {
     sqlite.close()

@@ -15,7 +15,7 @@ import type { registerChat } from './chat-routes.js'
 const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'"
 
 export function registerManagement(app: App, services: Services, chatRoutes: ReturnType<typeof registerChat>) {
-  const { db, chat, engine, realtime, secret, bridgePublicUrl } = services
+  const { db, chat, engine, realtime, secret, bridgePublicUrl, localRunner } = services
 
   function providerRow(id: string) {
     const row = db.select().from(providers).where(eq(providers.id, id)).get()
@@ -90,13 +90,15 @@ export function registerManagement(app: App, services: Services, chatRoutes: Ret
     return { bot_token: token, connect_command: `chior-bridge add --url ${quote(origin)} --token ${quote(token)} --driver ${quote(driver ?? 'codex')} --name ${quote(username)}` }
   }
 
+  app.get('/api/local-agents/status', c => c.json(localRunner.status()))
+
   app.get('/api/bridges', c => {
     const rows = db.select({ bot: bots, user: users }).from(bots)
       .innerJoin(users, eq(bots.user_id, users.id))
-      .where(eq(bots.mode, 'bridge'))
+      .where(inArray(bots.mode, ['bridge', 'local']))
       .orderBy(bots.created_at)
       .all()
-      .filter(({ user }) => !user.disabled)
+      .filter(({ user, bot }) => !user.disabled && (bot.mode === 'bridge' || localRunner.enabled))
     const devices: BridgeDevice[] = rows.map(({ bot, user }) => {
       const live = realtime.runtime(user.id)
       return {
@@ -106,7 +108,7 @@ export function registerManagement(app: App, services: Services, chatRoutes: Ret
         online: Boolean(live),
         hostname: live?.hostname ?? bot.runtime_meta_json?.hostname ?? null,
         driver: live?.driver ?? bot.driver_hint ?? null,
-        cwd: live?.cwd ?? bot.runtime_meta_json?.cwd ?? null,
+        cwd: live?.cwd ?? bot.runtime_meta_json?.cwd ?? bot.local_cwd ?? null,
         allowed_roots: live?.allowed_roots ?? (live?.cwd ? [live.cwd] : []),
       }
     })
@@ -117,7 +119,9 @@ export function registerManagement(app: App, services: Services, chatRoutes: Ret
     const bot = db.select({ bot: bots, user: users }).from(bots)
       .innerJoin(users, eq(bots.user_id, users.id))
       .where(eq(bots.user_id, botId)).get()
-    if (!bot || bot.bot.mode !== 'bridge' || bot.user.disabled) fail(404, 'BOT_NOT_FOUND', 'Bridge device not found')
+    if (!bot || (bot.bot.mode !== 'bridge' && bot.bot.mode !== 'local') || bot.user.disabled) {
+      fail(404, 'BOT_NOT_FOUND', 'Bridge device not found')
+    }
     const result = await realtime.listBridgeFs(botId, c.req.query('path') || undefined)
     return c.json(result)
   })
@@ -125,6 +129,12 @@ export function registerManagement(app: App, services: Services, chatRoutes: Ret
   app.post('/api/bots', async c => {
     const { display_name, username, avatar_url, bio, channel_ids, disabled, ...input } = await body(c, botCreateSchema)
     const owner = c.get('user')
+    if (input.mode === 'local') {
+      adminOnly(owner)
+      if (!localRunner.enabled) fail(400, 'LOCAL_AGENT_DISABLED', 'Local agent execution is disabled on this server')
+      if (input.driver_hint === 'custom') fail(400, 'INVALID_BOT', 'Custom shell drivers are only allowed in Bridge mode')
+      if (input.local_cwd) localRunner.resolveDir(input.local_cwd)
+    }
     const token = input.mode === 'bridge' ? `chior_bot_${randomHex()}` : undefined
     const { bot, joined } = db.transaction(() => {
       if (input.mode === 'provider' && (!input.provider_id || !input.model)) {
@@ -140,7 +150,9 @@ export function registerManagement(app: App, services: Services, chatRoutes: Ret
       const now = Date.now()
       db.insert(users).values({ id, kind: 'bot', username, display_name, avatar_url, bio, disabled, created_at: now }).run()
       const bot = db.insert(bots).values({
-        ...input, user_id: id, owner_id: owner.id, token_hash: token ? sha256(token) : null, created_at: now,
+        ...input,
+        driver_hint: input.mode === 'local' ? (input.driver_hint ?? 'codex') : input.driver_hint,
+        user_id: id, owner_id: owner.id, token_hash: token ? sha256(token) : null, created_at: now,
       }).returning().get()
       for (const room of joined) chat.addMembers(room, [id])
       return { bot, joined }
@@ -153,6 +165,11 @@ export function registerManagement(app: App, services: Services, chatRoutes: Ret
   app.patch('/api/bots/:id', async c => {
     const { avatar_url, display_name, bio, disabled, ...settings } = await body(c, botPatchSchema)
     const bot = manageBot(c.req.param('id'), c.get('user'))
+    if (bot.mode === 'local') {
+      adminOnly(c.get('user'))
+      if (settings.driver_hint === 'custom') fail(400, 'INVALID_BOT', 'Custom shell drivers are only allowed in Bridge mode')
+      if (settings.local_cwd) localRunner.resolveDir(settings.local_cwd)
+    }
     if (settings.provider_id) providerRow(settings.provider_id)
     const profile = Object.fromEntries(Object.entries({ avatar_url, display_name, bio, disabled }).filter(([, value]) => value !== undefined))
     const updated = db.transaction(() => {

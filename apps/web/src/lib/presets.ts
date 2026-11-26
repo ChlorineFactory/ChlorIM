@@ -50,8 +50,8 @@ export const BOT_TEMPLATES: BotTemplate[] = [
   {
     id: 'codex',
     label: 'Codex',
-    hint: 'codex-cli',
-    mode: 'bridge',
+    hint: '本机直连 · 免 Bridge',
+    mode: 'local',
     display_name: 'Codex',
     username: 'codex',
     avatar_url: 'preset:codex',
@@ -61,8 +61,8 @@ export const BOT_TEMPLATES: BotTemplate[] = [
   {
     id: 'claude-code',
     label: 'Claude Code',
-    hint: 'claude-code',
-    mode: 'bridge',
+    hint: '本机直连 · 免 Bridge',
+    mode: 'local',
     display_name: 'Claude Code',
     username: 'claude_code',
     avatar_url: 'preset:claude',
@@ -72,8 +72,8 @@ export const BOT_TEMPLATES: BotTemplate[] = [
   {
     id: 'antigravity',
     label: 'Antigravity',
-    hint: 'agy CLI',
-    mode: 'bridge',
+    hint: '本机直连 · agy CLI',
+    mode: 'local',
     display_name: 'Antigravity',
     username: 'agy',
     avatar_url: 'preset:agy',
@@ -83,12 +83,12 @@ export const BOT_TEMPLATES: BotTemplate[] = [
   {
     id: 'hermes',
     label: 'Hermes',
-    hint: 'hermes',
+    hint: 'Hermes 插件 / Bridge',
     mode: 'bridge',
     display_name: 'Hermes',
     username: 'hermes',
     avatar_url: 'preset:hermes',
-    bio: '本机 Hermes Gateway',
+    bio: 'Hermes Gateway 原生适配',
     driver_hint: 'hermes',
   },
   {

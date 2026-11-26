@@ -29,7 +29,7 @@ export function registerChat(app: App, services: Services) {
     const bot = db.select({ bot: bots, user: users }).from(bots)
       .innerJoin(users, eq(bots.user_id, users.id))
       .where(eq(bots.user_id, hostBotId)).get()
-    if (!bot || bot.bot.mode !== 'bridge') fail(400, 'INVALID_HOST_BOT', 'Selected device must be a Bridge bot')
+    if (!bot || (bot.bot.mode !== 'bridge' && bot.bot.mode !== 'local')) fail(400, 'INVALID_HOST_BOT', 'Selected device must be an Agent bot')
     const live = realtime.runtime(hostBotId)
     return {
       host_bot_id: hostBotId,

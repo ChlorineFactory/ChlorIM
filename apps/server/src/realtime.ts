@@ -6,6 +6,7 @@ import { publicUser } from './chat.js'
 import { bots, channelMembers, users } from './db.js'
 import type { Database } from './db.js'
 import { ApiFailure } from './errors.js'
+import type { LocalRunner } from './local-runner.js'
 
 export type BridgeConnection = { ws: WebSocket; runtime?: BridgeRuntime }
 export type ClientConnection = { ws: WebSocket; userId: string; sessionId: string }
@@ -17,7 +18,7 @@ export function writeSocket(ws: WebSocket, data: ClientDown | BridgeDown) {
   return true
 }
 
-export function createRealtime(db: Database) {
+export function createRealtime(db: Database, localRunner?: LocalRunner) {
   const clients = new Set<ClientConnection>()
   const bridges = new Map<string, BridgeConnection>()
   const fsPending = new Map<string, {
@@ -47,7 +48,31 @@ export function createRealtime(db: Database) {
   const clientIds = () => new Set([...clients].filter(client => client.ws.readyState === WebSocket.OPEN).map(client => client.userId))
   const runtime = (id: string) => {
     const bridge = bridges.get(id)
-    return bridge?.ws.readyState === WebSocket.OPEN ? bridge.runtime : undefined
+    if (bridge?.ws.readyState === WebSocket.OPEN && bridge.runtime) return bridge.runtime
+    if (localRunner?.enabled) {
+      const row = db.select({ user: users, bot: bots }).from(bots)
+        .innerJoin(users, eq(bots.user_id, users.id))
+        .where(eq(bots.user_id, id)).get()
+      if (row && !row.user.disabled && row.bot.mode === 'local') return localRunner.runtimeMeta(row.bot)
+    }
+    return undefined
+  }
+  const allRuntimes = (): Record<string, BridgeRuntime> => {
+    const map: Record<string, BridgeRuntime> = {}
+    for (const [id, bridge] of bridges) {
+      if (bridge.ws.readyState === WebSocket.OPEN && bridge.runtime) map[id] = bridge.runtime
+    }
+    if (localRunner?.enabled) {
+      const locals = db.select({ user: users, bot: bots }).from(bots)
+        .innerJoin(users, eq(bots.user_id, users.id))
+        .where(eq(bots.mode, 'local')).all()
+      for (const { user, bot } of locals) {
+        if (user.disabled) continue
+        const meta = localRunner.runtimeMeta(bot)
+        if (meta) map[user.id] = meta
+      }
+    }
+    return map
   }
   const online = (id: string) => members([id])[0]?.online ?? false
 
@@ -56,7 +81,11 @@ export function createRealtime(db: Database) {
     return db.select({ user: users, bot: bots }).from(users).leftJoin(bots, eq(users.id, bots.user_id))
       .where(and(ids === undefined ? undefined : inArray(users.id, ids),
         or(eq(users.kind, 'human'), isNotNull(bots.user_id)))).orderBy(users.username).all().map(({ user, bot }) => {
-        const meta = user.disabled ? undefined : runtime(user.id)
+        const meta = user.disabled
+          ? undefined
+          : bot?.mode === 'local'
+            ? localRunner?.runtimeMeta(bot)
+            : (bridges.get(user.id)?.ws.readyState === WebSocket.OPEN ? bridges.get(user.id)?.runtime : undefined)
         return {
           ...publicUser(user), online: !user.disabled && (Boolean(meta) || connected.has(user.id) || Boolean(bot?.mode === 'provider' && bot.provider_id && bot.model)),
           bot: bot ? { mode: bot.mode, model: bot.model, driver_hint: bot.driver_hint, runtime_meta: meta ?? null } : null,
@@ -90,6 +119,17 @@ export function createRealtime(db: Database) {
   }
 
   function listBridgeFs(botId: string, path?: string): Promise<BridgeFsList> {
+    const bot = db.select({ bot: bots, user: users }).from(bots)
+      .innerJoin(users, eq(bots.user_id, users.id))
+      .where(eq(bots.user_id, botId)).get()
+    if (bot && !bot.user.disabled && bot.bot.mode === 'local') {
+      if (!localRunner?.enabled) return Promise.reject(new ApiFailure(403, 'LOCAL_AGENT_DISABLED', 'Local agent execution is disabled on this server'))
+      try {
+        return Promise.resolve(localRunner.listFs(path, bot.bot.local_cwd))
+      } catch (error) {
+        return Promise.reject(error instanceof Error ? error : new ApiFailure(400, 'INVALID_PATH', 'Failed to list local directory'))
+      }
+    }
     const bridge = bridges.get(botId)
     if (!bridge?.runtime || bridge.ws.readyState !== WebSocket.OPEN) {
       return Promise.reject(new ApiFailure(503, 'DEVICE_OFFLINE', 'Selected device is currently offline'))
@@ -125,5 +165,5 @@ export function createRealtime(db: Database) {
     bridge.ws.close(4001, reason)
   }
 
-  return { clients, bridges, closeBridge, publish, direct, clientIds, runtime, online, members, memberUpdated, hello, detach, listBridgeFs, resolveBridgeFs }
+  return { clients, bridges, closeBridge, publish, direct, clientIds, runtime, allRuntimes, online, members, memberUpdated, hello, detach, listBridgeFs, resolveBridgeFs }
 }

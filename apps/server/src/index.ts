@@ -30,6 +30,11 @@ const { server, close } = createChiorServer({
   webDistDir: process.env.WEB_DIST_DIR ?? defaultWebDist,
   publicUploads: process.env.PUBLIC_UPLOADS === 'true',
   bridgePublicUrl: process.env.BRIDGE_PUBLIC_URL,
+  localAgent: {
+    enabled: process.env.LOCAL_AGENT_ENABLED !== 'false',
+    allowedRoots: process.env.LOCAL_ALLOWED_ROOTS?.split(',').map(value => value.trim()).filter(Boolean),
+    defaultCwd: process.env.LOCAL_DEFAULT_CWD?.trim() || undefined,
+  },
 })
 server.listen(port, host, () => console.log(`ChiorIM listening on ${host}:${port}`))
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {

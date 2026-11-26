@@ -318,7 +318,7 @@
             <div>
               <h3>
                 {selectedMember.display_name}
-                {#if selectedMember.kind === 'bot'}<span class="bot-tag">{selectedMember.bot?.mode === 'bridge' ? 'AGENT' : 'BOT'}</span>{/if}
+                {#if selectedMember.kind === 'bot'}<span class="bot-tag">{selectedMember.bot?.mode === 'provider' ? 'BOT' : 'AGENT'}</span>{/if}
                 {#if selectedMember.is_admin}<span class="bot-tag admin-tag">ADMIN</span>{/if}
               </h3>
               <p class="muted">

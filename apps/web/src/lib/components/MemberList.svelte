@@ -15,8 +15,8 @@
   function description(member: Member) {
     if (member.kind === 'human') return member.status_text || undefined
     if (member.bot?.mode === 'provider') return member.bot.model ? `模型 · ${member.bot.model}` : '未配置模型'
-    if (member.bot?.mode === 'bridge') {
-      if (!member.online) return '本地 Bridge 离线'
+    if (member.bot?.mode === 'local' || member.bot?.mode === 'bridge') {
+      if (!member.online) return member.bot.mode === 'local' ? '本机直连已关闭' : '远程 Bridge 离线'
       const runtime = member.bot.runtime_meta
       if (runtime) return runtime.cwd ? `${runtime.driver} · ${shortPath(runtime.cwd)}` : runtime.driver
       return member.bot.driver_hint ?? '已连接'
@@ -42,10 +42,10 @@
             <span class="member-text">
               <strong>
                 <span class="truncate">{member.display_name}</span>
-                {#if member.kind === 'bot'}<span class="bot-tag">{member.bot?.mode === 'bridge' ? 'AGENT' : 'BOT'}</span>{/if}
+                {#if member.kind === 'bot'}<span class="bot-tag">{member.bot?.mode === 'provider' ? 'BOT' : 'AGENT'}</span>{/if}
               </strong>
               <small>@{member.username}</small>
-              {#if detail}<small class="member-sub" class:agent-offline={detail === '本地 Bridge 离线'}>{detail}</small>{/if}
+              {#if detail}<small class="member-sub" class:agent-offline={detail === '远程 Bridge 离线' || detail === '本机直连已关闭'}>{detail}</small>{/if}
             </span>
           </button>
         {:else}

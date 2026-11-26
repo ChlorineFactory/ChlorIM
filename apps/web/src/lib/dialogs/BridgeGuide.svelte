@@ -52,8 +52,8 @@ hermes gateway status`
   <section class="settings-card">
     <div class="settings-card-head row-between">
       <div>
-        <h3><FolderOpen size={15} /> 多文件夹自动路由</h3>
-        <p class="muted">在左侧栏添加文件夹分组并绑定项目目录，分组下的子频道自动继承目录或指定子目录（如 <code>apps/web</code>）。只要目标路径在 <code>allowed_roots</code> 内，同一个 Agent 就能自动切到对应文件夹干活。</p>
+        <h3><FolderOpen size={15} /> 本机直连（免装 Bridge）与多文件夹路由</h3>
+        <p class="muted">如果 <code>codex</code> / <code>claude</code> / <code>agy</code> 与 ChlorIM 服务端装在<strong>同一台机器</strong>（非 Docker 隔离），在「Bots 与 Agents」直接选「本机直连 Agent」即可开箱即用，无需安装 <code>chior-bridge</code>。可以通过环境变量 <code>LOCAL_ALLOWED_ROOTS</code> 限制可访问目录（默认用户主目录）。</p>
       </div>
     </div>
   </section>
@@ -61,8 +61,8 @@ hermes gateway status`
   <section class="settings-card">
     <div class="settings-card-head row-between">
       <div>
-        <h3><Terminal size={15} /> chior-bridge 本机服务</h3>
-        <p class="muted">单守护进程托管 Claude Code / Codex / Antigravity (agy) / Hermes。</p>
+        <h3><Terminal size={15} /> chior-bridge 远程设备服务</h3>
+        <p class="muted">当 Agent 在<strong>另一台电脑</strong>，或 ChlorIM 运行在 <strong>Docker 容器</strong>中而 CLI 在宿主机上时，在目标设备运行 <code>chior-bridge</code> 接入。</p>
       </div>
       <button type="button" class="button quiet compact" onclick={() => void copy(bridgeSnippet, '命令')}>
         <Copy size={13} /> 复制命令

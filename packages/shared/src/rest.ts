@@ -2,7 +2,7 @@ import { z } from 'zod'
 import {
   attachmentSchema, avatarUrlSchema, boardStatusSchema, bookmarkSchema, botModeSchema, botSchema,
   bridgeDeviceSchema, bridgeFsListSchema, channelFileSchema, channelSchema, displayNameSchema, driverSchema, idSchema, inviteSchema,
-  memberSchema, messageSchema, presenceStatusSchema, providerSchema, providerTypeSchema,
+  localAgentStatusSchema, memberSchema, messageSchema, permissionModeSchema, presenceStatusSchema, providerSchema, providerTypeSchema,
   reactionSummarySchema, searchHitSchema, sessionInfoSchema, timestampSchema, triggerPolicySchema,
   usernameSchema, userSchema, webhookSchema, workDirSchema, workspaceSchema,
 } from './domain.js'
@@ -128,6 +128,8 @@ const botSettings = {
   temperature: z.number().min(0).max(2).optional(),
   context_limit: z.number().int().min(1).max(100).optional(),
   driver_hint: driverSchema.nullable().optional(),
+  local_cwd: workDirSchema.optional(),
+  permission_mode: permissionModeSchema.optional(),
   disabled: z.boolean().optional(),
 }
 export const botCreateSchema = profilePatchSchema.pick({ display_name: true, bio: true, avatar_url: true }).extend({
@@ -150,7 +152,7 @@ export const channelFileListSchema = z.array(channelFileSchema)
 export const webhookListSchema = z.array(webhookSchema)
 export const searchHitListSchema = z.array(searchHitSchema)
 export const bridgeDeviceListSchema = z.array(bridgeDeviceSchema)
-export { bridgeFsListSchema }
+export { bridgeFsListSchema, localAgentStatusSchema }
 
 export const apiErrorSchema = z.object({
   error: z.object({ code: z.string(), message: z.string(), details: z.unknown().optional() }),

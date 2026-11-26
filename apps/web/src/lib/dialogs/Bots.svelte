@@ -53,7 +53,9 @@
     if (bot_token && connect_command) {
       credentials = { bot_token, connect_command }
       reveal = false
-      workspace.toast('本地 Agent Bot 已创建，请复制下方一次性连接命令', 'success')
+      workspace.toast('远程设备 Agent 已创建，请复制下方一次性连接命令', 'success')
+    } else if (bot.mode === 'local') {
+      workspace.toast('本机直连 Agent 已创建并就绪，无需安装 Bridge', 'success')
     } else {
       workspace.toast('Bot 已保存', 'success')
     }
@@ -180,7 +182,7 @@
 
   {#if form}
     {#key form === 'new' ? 'new-' + (template?.id ?? 'blank') : form.user_id}
-      <BotEditor initial={form === 'new' ? undefined : form} {template} {providers} folders={workspace.workspaces} rooms={visibleRooms}
+      <BotEditor initial={form === 'new' ? undefined : form} {template} isAdmin={Boolean(workspace.user?.is_admin)} {providers} folders={workspace.workspaces} rooms={visibleRooms}
         close={() => { form = null; template = undefined }} {saved} />
     {/key}
   {/if}
@@ -199,10 +201,10 @@
                 {member?.display_name ?? bot.user.display_name}
                 {#if isDisabled}<span class="archived-tag">已停用</span>{/if}
               </strong>
-              <small>@{bot.user.username} · {bot.mode === 'provider' ? (bot.model ?? '未配模型') : (member?.bot?.runtime_meta?.driver ?? bot.driver_hint ?? 'bridge')}</small>
+              <small>@{bot.user.username} · {bot.mode === 'provider' ? (bot.model ?? '未配模型') : (member?.bot?.runtime_meta?.driver ?? bot.driver_hint ?? bot.mode)}</small>
             </span>
           </div>
-          <span class="bot-tag">{bot.mode === 'bridge' ? 'LOCAL AGENT' : 'MODEL BOT'}</span>
+          <span class="bot-tag">{bot.mode === 'local' ? 'LOCAL DIRECT' : bot.mode === 'bridge' ? 'BRIDGE AGENT' : 'MODEL BOT'}</span>
         </div>
 
         {#if member?.bot?.runtime_meta?.cwd}

@@ -55,7 +55,7 @@ test('probes a session without 401, records devices and renews a valid cookie af
   expect(probe.headers.get('Set-Cookie')).toContain('Max-Age=2592000')
   const after = (await h.api<SessionInfo[]>('GET', '/api/auth/sessions', auth.token))[0]
   expect(after.expires_at - after.last_active_at).toBe(2_592_000_000)
-  expect(h.sqlite.pragma('user_version', { simple: true })).toBe(4)
+  expect(h.sqlite.pragma('user_version', { simple: true })).toBe(5)
 })
 
 test('changes passwords and revokes individual or other devices immediately over WebSocket', async () => {
