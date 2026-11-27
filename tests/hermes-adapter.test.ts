@@ -127,13 +127,13 @@ asyncio.run(main())
   expect(fsRes.entries.map(e => e.name)).toEqual(['AlphaRepo'])
   await h.api('GET', `/api/bridges/${bot.user_id}/fs?path=${encodeURIComponent(realpathSync(outsideDir))}`, owner.token, undefined, 400)
 
-  // 3. Mention @hermes_gw in folder channel -> verify streamed reply with injected work_dir
+  // 3. Mention @hermes_gw in folder channel -> strips @hermes_gw mention and injects work_dir
   await h.api<Message>('POST', `/api/channels/${room.id}/messages`, owner.token, { content: '@hermes_gw hello' }, 201)
   const reply = await waitFor(async () => {
     const page = await h.api<MessagePage>('GET', `/api/channels/${room.id}/messages`, owner.token)
     return page.messages.find(m => m.author_id === bot.user_id && m.status === 'done')
   })
-  expect(reply.content).toBe(`Hermes[hermes-room]: got [ChlorIM Workspace Directory: ${realpathSync(subDir)}]\n@hermes_gw hello`)
+  expect(reply.content).toBe(`Hermes[hermes-room]: got [ChlorIM Workspace Directory: ${realpathSync(subDir)}]\nhello`)
 
   // 4. Trigger proactive Cron send + edit via Bot REST API
   child.stdin.write('PROACTIVE\n')
@@ -185,8 +185,15 @@ async def main():
     async def on_event(event):
         if "SILENT_DROP" in event.text:
             return None
+        if event.text.startswith("/"):
+            assert event.message_type == plugin.MessageType.COMMAND, event.message_type
+            return f"CMD:{event.text}"
         assert event.source.user_id == "hermes_bg_owner"
-        return f"Async reply to {event.source.user_id}: {event.text}"
+        # Simulate non-monotonic rolling progress edits (finalize=False) before final answer
+        m = await gw.send(event.source.chat_id, "step 1\\nstep 2")
+        await gw.edit_message(event.source.chat_id, m.message_id, "step 2\\nstep 3", finalize=False)
+        await gw.edit_message(event.source.chat_id, m.message_id, f"Async reply to {event.source.user_id}: {event.text}", finalize=True)
+        return None
     gw.set_message_handler(on_event)
     assert await gw.connect() is True
     print("READY", flush=True)
@@ -214,15 +221,23 @@ asyncio.run(main())
 
   await waitFor(async () => stdout.includes('READY') ? true : (child.exitCode !== null ? Promise.reject(new Error(`Python exited early: ${stderr}`)) : undefined))
 
-  // 1. Background handler returns text 150ms AFTER handle_message() returns None -> must NOT finish empty or double-post!
+  // 1. Background handler strips @hermes_bg, streams non-monotonic edits without splitting, and patches final reply
   await h.api<Message>('POST', `/api/channels/${general.id}/messages`, owner.token, { content: '@hermes_bg 你好' }, 201)
   const reply = await waitFor(async () => {
     const page = await h.api<MessagePage>('GET', `/api/channels/${general.id}/messages`, owner.token)
-    return page.messages.find(m => m.author_id === bot.user_id && m.status === 'done')
+    return page.messages.find(m => m.author_id === bot.user_id && m.status === 'done' && m.content.includes('Async reply'))
   })
-  expect(reply.content).toBe('Async reply to hermes_bg_owner: @hermes_bg 你好')
+  expect(reply.content).toBe('Async reply to hermes_bg_owner: 你好')
   const afterFirst = await h.api<MessagePage>('GET', `/api/channels/${general.id}/messages`, owner.token)
   expect(afterFirst.messages.filter(m => m.author_id === bot.user_id)).toHaveLength(1)
+
+  // 1b. @hermes_bg /sethome strips @mention, omits workspace prefix, and marks MessageType.COMMAND
+  await h.api<Message>('POST', `/api/channels/${general.id}/messages`, owner.token, { content: '@hermes_bg /sethome' }, 201)
+  const cmdReply = await waitFor(async () => {
+    const page = await h.api<MessagePage>('GET', `/api/channels/${general.id}/messages`, owner.token)
+    return page.messages.find(m => m.author_id === bot.user_id && m.status === 'done' && m.content.startsWith('CMD:'))
+  })
+  expect(cmdReply.content).toBe('CMD:/sethome')
 
   // 2. Silent drop (e.g. Hermes ALLOWED_USERS rejection) must surface as status: 'error' with actionable hint, NOT blank done!
   await h.api<Message>('POST', `/api/channels/${general.id}/messages`, owner.token, { content: '@hermes_bg SILENT_DROP' }, 201)

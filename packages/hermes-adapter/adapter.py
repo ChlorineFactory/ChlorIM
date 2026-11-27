@@ -19,6 +19,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import socket
 from typing import Any, Callable, Dict, List, Optional, Tuple
 import urllib.parse
@@ -88,6 +89,7 @@ try:
 except ImportError:
     class MessageType(str):  # type: ignore[no-redef]
         TEXT = "text"
+        COMMAND = "command"
 
     @dataclass
     class MessageEvent:  # type: ignore[no-redef]
@@ -416,13 +418,23 @@ class ChlorIMAdapter(BasePlatformAdapter):
                     await self._send_ws_delta(active.run_id, delta)
                     active.emitted = content
             elif content and content != active.emitted:
-                # Non-monotonic edit (e.g. replacing a placeholder); emit clean delta or patch on finalize.
+                # Non-monotonic edit (e.g. rolling tool progress lines or replacing a draft).
+                # Do NOT finish the run early while finalize=False; only patch final content on finalize=True.
                 if not active.emitted:
                     await self._send_ws_delta(active.run_id, content)
                     active.emitted = content
-                else:
+                elif finalize:
                     await self._finish_run(active, content_override=content)
                     return SendResult(success=True, message_id=message_id)
+                else:
+                    # Append only newly added lines so live progress keeps streaming smoothly in the same bubble.
+                    prev_lines = active.emitted.splitlines()
+                    next_lines = content.splitlines()
+                    new_lines = [line for line in next_lines if line and line not in prev_lines]
+                    if new_lines:
+                        chunk = "\n" + "\n".join(new_lines)
+                        await self._send_ws_delta(active.run_id, chunk)
+                        active.emitted += chunk
 
             if finalize:
                 await self._finish_run(active)
@@ -626,15 +638,26 @@ class ChlorIMAdapter(BasePlatformAdapter):
         self._runs_by_id[run_id] = run
         run.task = asyncio.create_task(self._execute_run(run, event), name=f"chlorim-run-{run_id[:8]}")
 
+    def _strip_bot_mention(self, text: str) -> str:
+        cleaned = text.strip()
+        if self._bot_username:
+            pattern = rf"^(?:@{re.escape(self._bot_username)}\b[\s,，:：]*)+"
+            stripped = re.sub(pattern, "", cleaned, flags=re.IGNORECASE).strip()
+            if stripped:
+                return stripped
+        return cleaned
+
     async def _execute_run(self, run: _ActiveRun, event: Dict[str, Any]) -> None:
         try:
             chat_info = await self.get_chat_info(run.channel_id)
             chat_type = "dm" if chat_info.get("type") == "dm" else "group"
             chat_name = chat_info.get("name") or run.channel_id
             sender = event.get("sender") or {}
-            prompt = str(event.get("prompt") or "")
+            raw_prompt = str(event.get("prompt") or "")
+            prompt = self._strip_bot_mention(raw_prompt)
+            is_command = prompt.startswith("/")
             work_dir = event.get("work_dir")
-            if work_dir:
+            if work_dir and not is_command:
                 prompt = f"[ChlorIM Workspace Directory: {work_dir}]\n{prompt}"
 
             source = self._make_source(
@@ -650,6 +673,7 @@ class ChlorIMAdapter(BasePlatformAdapter):
                 source=source,
                 message_id=run.message_id,
                 raw_message=event,
+                is_command=is_command,
             )
             result = await self.handle_message(msg_event)
             if isinstance(result, str) and result and not run.emitted and not run.finished:
@@ -700,14 +724,25 @@ class ChlorIMAdapter(BasePlatformAdapter):
             accepted.setdefault("platform", platform)
         return SessionSource(**accepted)
 
-    def _make_event(self, *, text: str, source: Any, message_id: str, raw_message: Dict[str, Any]) -> Any:
+    def _make_event(
+        self,
+        *,
+        text: str,
+        source: Any,
+        message_id: str,
+        raw_message: Dict[str, Any],
+        is_command: bool = False,
+    ) -> Any:
         sig = inspect.signature(MessageEvent)
         params = sig.parameters
         kwargs: Dict[str, Any] = {"text": text, "source": source}
         if "message_id" in params:
             kwargs["message_id"] = message_id
         if "message_type" in params:
-            kwargs["message_type"] = getattr(MessageType, "TEXT", "text")
+            if is_command and hasattr(MessageType, "COMMAND"):
+                kwargs["message_type"] = getattr(MessageType, "COMMAND")
+            else:
+                kwargs["message_type"] = getattr(MessageType, "TEXT", "text")
         if "raw_message" in params:
             kwargs["raw_message"] = raw_message
         return MessageEvent(**kwargs)
