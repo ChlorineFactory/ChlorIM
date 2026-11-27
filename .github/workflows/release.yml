@@ -83,6 +83,21 @@ jobs:
         shell: bash
         run: |
           tar -czf "release/chiorim-${{ matrix.label }}.tar.gz" -C "release/${{ matrix.label }}" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chiorim-${{ matrix.label }}
+          path: release/chiorim-${{ matrix.label }}.tar.gz
+          retention-days: 1
+
+  release:
+    needs: binaries
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist-artifacts
+          merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
-          files: release/chiorim-${{ matrix.label }}.tar.gz
+          files: dist-artifacts/*.tar.gz
