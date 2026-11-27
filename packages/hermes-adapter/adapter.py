@@ -187,6 +187,8 @@ class _ActiveRun:
     task: Optional[asyncio.Task[Any]] = None
     emitted: str = ""
     finished: bool = False
+    handler_started: asyncio.Event = field(default_factory=asyncio.Event)
+    done_event: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 class ChlorIMAdapter(BasePlatformAdapter):
@@ -274,6 +276,60 @@ class ChlorIMAdapter(BasePlatformAdapter):
             except asyncio.CancelledError:
                 pass
         self._mark_disconnected()
+
+    def _find_run_for_event(self, event: Any) -> Optional[_ActiveRun]:
+        msg_id = getattr(event, "message_id", None)
+        if isinstance(msg_id, str) and msg_id in self._runs_by_message:
+            return self._runs_by_message[msg_id]
+        source = getattr(event, "source", None)
+        chat_id = getattr(source, "chat_id", None)
+        thread_id = getattr(source, "thread_id", None)
+        if isinstance(chat_id, str):
+            run = self._runs_by_scope.get((chat_id, thread_id))
+            if run is not None:
+                return run
+            for candidate in self._runs_by_scope.values():
+                if candidate.channel_id == chat_id and not candidate.finished:
+                    return candidate
+        return None
+
+    def set_message_handler(self, handler: Callable[[Any], Any]) -> None:
+        async def _tracked_handler(event: Any) -> Any:
+            run = self._find_run_for_event(event)
+            if run is not None:
+                run.handler_started.set()
+            try:
+                result = await handler(event)
+            except asyncio.CancelledError:
+                if run is not None and not run.finished:
+                    run.finished = True
+                    run.done_event.set()
+                raise
+            except Exception as exc:
+                logger.exception("Hermes message handler failed for ChlorIM event")
+                if run is not None and not run.finished:
+                    await self._finish_run(run, error=str(exc) or "Hermes agent error")
+                raise
+
+            if run is not None and not run.finished:
+                if isinstance(result, str) and result.strip():
+                    if not run.emitted:
+                        await self.send(run.channel_id, result, metadata={"thread_id": run.thread_root_id})
+                    await self._finish_run(run)
+                    # Return None so Hermes BasePlatformAdapter does not post a duplicate REST copy.
+                    return None
+                if run.emitted:
+                    await self._finish_run(run)
+                    return None
+                # Handler returned nothing and emitted no deltas (e.g. unauthorized user dropped by Hermes).
+                await self._finish_run(
+                    run,
+                    error="Hermes 未返回内容（请检查 ~/.hermes/.env 是否已设置 CHLORIM_ALLOW_ALL_USERS=true 或 CHLORIM_ALLOWED_USERS，并查看 hermes gateway 日志）",
+                )
+                return None
+            return result
+
+        super().set_message_handler(_tracked_handler)
 
     # ------------------------------------------------------------------
     # Outbound BasePlatformAdapter methods
@@ -413,6 +469,7 @@ class ChlorIMAdapter(BasePlatformAdapter):
         if run.finished:
             return
         run.finished = True
+        run.done_event.set()
         self._runs_by_scope.pop((run.channel_id, run.thread_root_id), None)
         self._runs_by_message.pop(run.message_id, None)
         self._runs_by_id.pop(run.run_id, None)
@@ -584,7 +641,7 @@ class ChlorIMAdapter(BasePlatformAdapter):
                 chat_id=run.channel_id,
                 chat_type=chat_type,
                 chat_name=chat_name,
-                user_id=str(sender.get("id") or ""),
+                user_id=str(sender.get("username") or sender.get("id") or ""),
                 user_name=str(sender.get("display_name") or sender.get("username") or "user"),
                 thread_id=run.thread_root_id,
             )
@@ -597,10 +654,29 @@ class ChlorIMAdapter(BasePlatformAdapter):
             result = await self.handle_message(msg_event)
             if isinstance(result, str) and result and not run.emitted and not run.finished:
                 await self.send(run.channel_id, result, metadata={"thread_id": run.thread_root_id})
-            if not run.finished:
                 await self._finish_run(run)
+                return
+
+            # In real Hermes Gateway, BasePlatformAdapter.handle_message() spawns a background task
+            # and returns None immediately. Wait for the tracked handler (or finalize=True) to finish.
+            if not run.finished:
+                if not run.handler_started.is_set():
+                    try:
+                        await asyncio.wait_for(run.handler_started.wait(), timeout=10.0)
+                    except asyncio.TimeoutError:
+                        if not run.finished:
+                            if run.emitted:
+                                await self._finish_run(run)
+                            else:
+                                await self._finish_run(
+                                    run,
+                                    error="Hermes Gateway 未处理此消息（请确认已启用 chlorim 插件并在 ~/.hermes/.env 配置 CHLORIM_ALLOW_ALL_USERS=true）",
+                                )
+                        return
+                await run.done_event.wait()
         except asyncio.CancelledError:
             run.finished = True
+            run.done_event.set()
             self._runs_by_scope.pop((run.channel_id, run.thread_root_id), None)
             self._runs_by_message.pop(run.message_id, None)
             self._runs_by_id.pop(run.run_id, None)

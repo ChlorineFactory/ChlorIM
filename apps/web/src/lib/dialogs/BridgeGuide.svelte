@@ -24,6 +24,7 @@ bash packages/hermes-adapter/install.sh
 # 写入凭据到 ~/.hermes/.env 后启用
 export CHLORIM_URL='${origin}'
 export CHLORIM_BOT_TOKEN='chior_bot_<Token>'
+export CHLORIM_ALLOW_ALL_USERS=true
 export CHLORIM_ALLOWED_ROOTS='~/Documents/Codes'
 hermes plugins enable chlorim
 hermes gateway status`

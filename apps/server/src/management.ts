@@ -91,7 +91,7 @@ export function registerManagement(app: App, services: Services, chatRoutes: Ret
       const httpOrigin = origin.replace(/^ws:/, 'http:').replace(/^wss:/, 'https:')
       return {
         bot_token: token,
-        connect_command: `export CHLORIM_URL=${quote(httpOrigin)}\nexport CHLORIM_BOT_TOKEN=${quote(token)}\nhermes plugins enable chlorim`,
+        connect_command: `export CHLORIM_URL=${quote(httpOrigin)}\nexport CHLORIM_BOT_TOKEN=${quote(token)}\nexport CHLORIM_ALLOW_ALL_USERS=true\nhermes plugins enable chlorim`,
       }
     }
     return { bot_token: token, connect_command: `chior-bridge add --url ${quote(origin)} --token ${quote(token)} --driver ${quote(driver ?? 'codex')} --name ${quote(username)}` }

@@ -32,6 +32,9 @@ cp packages/hermes-adapter/{plugin.yaml,__init__.py,adapter.py,ws_client.py} ~/.
 ```dotenv
 CHLORIM_URL=http://127.0.0.1:3000
 CHLORIM_BOT_TOKEN=chior_bot_xxxxxxxxxxxxxxxx
+# 授权 ChlorIM 用户与 Hermes 对话（二选一：允许全部成员，或填逗号分隔的 ChlorIM 用户名）
+CHLORIM_ALLOW_ALL_USERS=true
+# CHLORIM_ALLOWED_USERS=your_username
 # 可选：授权 ChlorIM 网页端浏览该设备上的项目目录（逗号分隔）
 CHLORIM_ALLOWED_ROOTS=~/Documents/Codes
 # 可选：Hermes Cron 定时任务默认投递频道 ID（deliver=chlorim）
