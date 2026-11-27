@@ -54,11 +54,14 @@ class DummyCtx:
 plugin.register(DummyCtx())
 assert registered["name"] == "chlorim"
 assert registered["cron_deliver_env_var"] == "CHLORIM_HOME_CHANNEL"
+assert registered["allowed_users_env"] == "CHLORIM_ALLOWED_USERS"
+assert registered["allow_all_env"] == "CHLORIM_ALLOW_ALL_USERS"
 assert registered["check_fn"]() is True
 
 async def main():
     cfg = plugin.PlatformConfig(enabled=True)
     gw = registered["adapter_factory"](cfg)
+    assert gw.MAX_MESSAGE_LENGTH >= 100_000
 
     async def on_event(event):
         info = await gw.get_chat_info(event.source.chat_id)
@@ -188,8 +191,8 @@ async def main():
     gw = InteractiveHermesAdapter(plugin.PlatformConfig(enabled=True))
 
     async def on_event(event):
-        # 1. Emit tool progress lines -> should fold into tool_call blocks, NOT prose!
-        await gw.send(event.source.chat_id, "💻 Running ls -la\\n⚙️ tool_search: \\"cronjob\\"")
+        # 1. Emit tool progress lines (including memory update + markdown-wrapped tool line) -> should fold into tool_call blocks!
+        await gw.send(event.source.chat_id, "_💻 Running ls -la_\\n⚙️ tool_search: \\"cronjob\\"\\n🧠 Updating memory ~memory: \\"plugins\\"")
 
         # 2. Ask a clarify choice question via plain text fallback -> should become a choice prompt card!
         gw.pending_future = asyncio.get_running_loop().create_future()

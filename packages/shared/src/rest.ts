@@ -59,7 +59,7 @@ export const addMembersSchema = z.union([
   z.object({ user_ids: members.min(1) }).transform(value => value.user_ids),
 ])
 export const messageFields = {
-  content: z.string().max(60_000),
+  content: z.string().max(200_000),
   thread_root_id: idSchema.nullable().optional(),
   reply_to_id: idSchema.nullable().optional(),
   board_status: boardStatusSchema.nullable().optional(),

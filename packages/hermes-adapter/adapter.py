@@ -185,7 +185,7 @@ _TOOL_LINE_RE = re.compile(
 )
 _TOOL_PREFIX_EMOJIS = (
     "💻", "⚙️", "⚙", "📚", "⏰", "🐍", "🔍", "🔎", "📄", "📝",
-    "🌐", "🛠️", "🛠", "🔧", "📦", "⚡", "🗂️", "🗂", "📁", "🧪", "📊", "📡", "🤖",
+    "🌐", "🛠️", "🛠", "🔧", "📦", "⚡", "🗂️", "🗂", "📁", "🧪", "📊", "📡", "🤖", "🧠",
 )
 _CLARIFY_OPTION_RE = re.compile(r"^\s*(\d+)[\.\)）、]\s+(.+?)\s*$")
 
@@ -195,10 +195,14 @@ def _classify_tool_line(line: str) -> Optional[Tuple[str, str]]:
     stripped = line.strip()
     if not stripped:
         return None
-    if not any(stripped.startswith(prefix) for prefix in _TOOL_PREFIX_EMOJIS):
+    # Strip optional leading quote / emphasis markers Hermes or Markdown wrappers may add.
+    unwrapped = re.sub(r"^[>\s*_`]+", "", stripped)
+    unwrapped = re.sub(r"[*_`]+$", "", unwrapped).strip()
+    if not unwrapped or not any(unwrapped.startswith(prefix) for prefix in _TOOL_PREFIX_EMOJIS):
         return None
-    match = _TOOL_LINE_RE.match(stripped)
-    body = match.group(1).strip() if match else stripped
+    match = _TOOL_LINE_RE.match(unwrapped)
+    body = match.group(1).strip() if match else unwrapped
+    body = re.sub(r"^[*_`]+|[*_`]+$", "", body).strip()
     if not body:
         return None
     if ":" in body[:36]:
@@ -206,8 +210,11 @@ def _classify_tool_line(line: str) -> Optional[Tuple[str, str]]:
         if re.fullmatch(r"[A-Za-z0-9_.\-/ ]{1,36}", head.strip()):
             return head.strip()[:80], rest.strip() or body
     words = body.split(None, 2)
-    if len(words) >= 2 and words[0].lower() in ("running", "reading", "searching", "scheduling", "executing", "calling", "writing", "editing", "fetching"):
-        name = f"{words[0]} {words[1]}" if words[1].lower() in ("skill", "code", "tool", "command") else words[0]
+    if len(words) >= 2 and words[0].lower() in (
+        "running", "reading", "searching", "scheduling", "executing", "calling",
+        "writing", "editing", "fetching", "updating", "creating", "deleting", "removing",
+    ):
+        name = f"{words[0]} {words[1]}" if words[1].lower() in ("skill", "code", "tool", "command", "memory") else words[0]
         return name[:80], body
     return body[:64], body
 
@@ -304,6 +311,7 @@ class ChlorIMAdapter(BasePlatformAdapter):
     """Native Hermes Gateway platform adapter connecting directly to ChlorIM."""
 
     PLATFORM_NAME = "chlorim"
+    MAX_MESSAGE_LENGTH = 100_000
 
     def __init__(self, config: Any) -> None:
         platform = self._resolve_platform_enum()
@@ -1075,6 +1083,8 @@ def register(ctx: Any) -> None:
         "adapter_factory": lambda cfg: ChlorIMAdapter(cfg),
         "check_fn": check_requirements,
         "required_env": ["CHLORIM_URL", "CHLORIM_BOT_TOKEN"],
+        "allowed_users_env": "CHLORIM_ALLOWED_USERS",
+        "allow_all_env": "CHLORIM_ALLOW_ALL_USERS",
         "env_enablement_fn": _env_enablement,
         "cron_deliver_env_var": "CHLORIM_HOME_CHANNEL",
         "emoji": "🌲",

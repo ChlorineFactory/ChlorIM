@@ -14,8 +14,9 @@ import type { createSecretBox } from './security.js'
 import { visionImages } from './vision.js'
 
 export { MAX_BOT_HOPS } from './chat.js'
-const TIMEOUT = 5 * 60_000
-const MAX_OUTPUT = 2_000_000
+const IDLE_TIMEOUT = 5 * 60_000
+const MAX_TOTAL_DURATION = 30 * 60_000
+const MAX_OUTPUT = 4_000_000
 
 function withAttachmentNames(content: string, blocks: MessageBlock[]) {
   const names = blocks.flatMap(block => block.type === 'attachment' ? [block.name] : [])
@@ -33,6 +34,7 @@ type Run = {
   controller: AbortController
   bridge?: BridgeConnection
   timer?: NodeJS.Timeout
+  startedAt: number
   flush?: NodeJS.Timeout
   content: string
   blocks: MessageBlock[]
@@ -92,8 +94,15 @@ export function createEngine(db: Database, chat: ReturnType<typeof createChat>, 
     if (head && queue?.length && !closed) queueMicrotask(() => start(queue[0]))
   }
 
+  function armIdleTimer(run: Run) {
+    if (run.timer) clearTimeout(run.timer)
+    const remaining = Math.max(1000, MAX_TOTAL_DURATION - (Date.now() - run.startedAt))
+    run.timer = setTimeout(() => finish(run, 'error', 'Bot run timed out'), Math.min(IDLE_TIMEOUT, remaining))
+  }
+
   function applyDelta(run: Run, event: Delta) {
     if (active.get(run.request.message_id) !== run) return
+    armIdleTimer(run)
     const { part, tool, delta, prompt } = event
     run.size += (delta?.length ?? 0) + (tool ? JSON.stringify(tool).length : 0) + (prompt ? JSON.stringify(prompt).length : 0)
     if (run.size > MAX_OUTPUT) {
@@ -142,11 +151,8 @@ export function createEngine(db: Database, chat: ReturnType<typeof createChat>, 
       const updated = persist(run)
       if (updated) realtime.publish({ type: 'message.updated', message: chat.dto(updated) }, run.channelId)
     }
-    // Reset timeout so long interactive sessions do not time out right after user responds.
-    if (run.timer) {
-      clearTimeout(run.timer)
-      run.timer = setTimeout(() => finish(run, 'error', 'Bot run timed out'), TIMEOUT)
-    }
+    // Reset idle timeout so long interactive sessions do not time out right after user responds.
+    armIdleTimer(run)
     if (!writeSocket(run.bridge.ws, {
       type: 'run.input',
       run_id: run.request.run_id,
@@ -215,7 +221,8 @@ export function createEngine(db: Database, chat: ReturnType<typeof createChat>, 
     const target = chat.memberBots(run.channelId).find(({ user }) => user.id === run.botId && !user.disabled)
     if (!target) return finish(run, 'error', 'Bot is disabled or no longer in this channel')
     const { bot } = target
-    run.timer = setTimeout(() => finish(run, 'error', 'Bot run timed out'), TIMEOUT)
+    run.startedAt = Date.now()
+    armIdleTimer(run)
     if (bot.mode === 'provider') { void stream(run, bot); return }
     if (bot.mode === 'local') { void runLocal(run, bot); return }
     const bridge = realtime.bridges.get(run.botId)
@@ -261,7 +268,7 @@ export function createEngine(db: Database, chat: ReturnType<typeof createChat>, 
         sender: { id: sender.id, username: sender.username, display_name: sender.display_name },
       },
       botId: bot.user_id, channelId: room.id, workspaceId: room.workspace_id, triggerMessageId: source.id,
-      controller: new AbortController(), content: '', blocks: [], size: 0, history, hops: row.bot_hop_count,
+      controller: new AbortController(), startedAt: Date.now(), content: '', blocks: [], size: 0, history, hops: row.bot_hop_count,
     }
     active.set(row.id, run)
     byRunId.set(run.request.run_id, run)
