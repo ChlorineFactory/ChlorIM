@@ -13,6 +13,7 @@ const textMime = new Set(['text/plain', 'text/markdown', 'text/csv', 'text/tab-s
   'text/x-shellscript', 'text/x-c', 'text/x-java-source', 'text/x-go', 'text/x-rust', 'text/yaml', 'application/yaml',
   'application/json', 'application/xml', 'text/xml', 'text/javascript', 'application/javascript', 'text/css', 'text/html',
   'application/typescript', 'application/x-sh', 'application/toml', 'application/sql'])
+const docMime = new Set(['application/pdf', 'application/zip', 'application/x-zip-compressed', 'application/gzip'])
 const sourceExtension = /\.(?:txt|md|csv|tsv|log|json|jsonl|yaml|yml|toml|xml|js|mjs|cjs|ts|tsx|jsx|py|sh|zsh|rb|go|rs|c|cpp|h|java|kt|swift|sql|css|html|vue|svelte)$/i
 const MAX_HEADER_BYTES = 8192
 
@@ -75,7 +76,7 @@ export function registerUploads(app: App, dataDir: string, uploadLimit: number, 
     if (file.size > uploadLimit) fail(413, 'FILE_TOO_LARGE', 'File exceeds the upload limit')
     const name = file.name.replace(/[\\/\x00-\x1f\x7f]/g, '_').slice(0, 255) || 'attachment'
     const mime = uploadMime(file.type, name)
-    if (!imageMime.has(mime) && !textMime.has(mime)) fail(415, 'UNSUPPORTED_MEDIA_TYPE', 'Unsupported file type')
+    if (!imageMime.has(mime) && !textMime.has(mime) && !docMime.has(mime)) fail(415, 'UNSUPPORTED_MEDIA_TYPE', 'Unsupported file type')
     const id = randomHex(16)
     const attachment: Attachment = { url: `/uploads/${id}`, name, mime, size: file.size }
     await mkdir(directory, { recursive: true, mode: 0o700 })

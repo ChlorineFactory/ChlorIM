@@ -383,3 +383,86 @@ asyncio.run(main())
   const [code] = await exited
   expect(code, stderr).toBe(0)
 })
+
+test('preserves active run on tool-only finalize & delete_message, and uploads local files via send_image/send_document', async () => {
+  const h = await harness()
+  const owner = await h.person('hermes_media_owner')
+  const general = await h.general(owner.token)
+  const root = mkdtempSync(join(tmpdir(), 'chiorim-hermes-media-'))
+  cleanup(() => rmSync(root, { recursive: true, force: true }))
+
+  const sampleImg = join(root, 'chart.png')
+  // Minimal valid 1x1 PNG header bytes
+  writeFileSync(sampleImg, Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'))
+  const sampleDoc = join(root, 'report.pdf')
+  writeFileSync(sampleDoc, Buffer.from('%PDF-1.4\n%test\n'))
+
+  const bot = await h.api<BotWriteResponse>('POST', '/api/bots', owner.token, {
+    mode: 'bridge', username: 'hermes_media', display_name: 'Hermes Media', driver_hint: 'hermes',
+  }, 201)
+
+  const runnerScript = join(root, 'run_media_adapter.py')
+  writeFileSync(runnerScript, `
+import asyncio, sys
+sys.path.insert(0, ${JSON.stringify(resolve('packages/hermes-adapter'))})
+import adapter as plugin
+
+async def main():
+    gw = plugin.ChlorIMAdapter(plugin.PlatformConfig(enabled=True))
+    async def on_event(event):
+        # Tool-only progress bubble with finalize=True followed by delete_message must NOT prematurely end the run!
+        progress = await gw.send(event.source.chat_id, "💻 Running ls -la")
+        await gw.edit_message(event.source.chat_id, progress.message_id, "🧠 Updating memory: saved", finalize=True)
+        assert await gw.delete_message(event.source.chat_id, progress.message_id) is True
+        # Upload local image + PDF via native adapter methods
+        img_res = await gw.send_image(event.source.chat_id, ${JSON.stringify(sampleImg)}, caption="Generated chart")
+        assert img_res.success, img_res.error
+        doc_res = await gw.send_document(event.source.chat_id, ${JSON.stringify(sampleDoc)}, caption="Attached PDF")
+        assert doc_res.success, doc_res.error
+        return "Final answer after tool progress and uploads"
+    gw.set_message_handler(on_event)
+    assert await gw.connect() is True
+    print("READY", flush=True)
+    await asyncio.to_thread(sys.stdin.readline)
+    await gw.disconnect()
+
+asyncio.run(main())
+`)
+
+  const child = spawn('python3', [runnerScript], {
+    env: { ...process.env, CHLORIM_URL: h.url, CHLORIM_BOT_TOKEN: bot.bot_token! },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  })
+  let stdout = ''
+  let stderr = ''
+  child.stdout.on('data', chunk => { stdout += chunk.toString() })
+  child.stderr.on('data', chunk => { stderr += chunk.toString() })
+  const exited = once(child, 'exit')
+  cleanup(async () => {
+    if (child.exitCode === null) {
+      child.stdin.end()
+      await Promise.race([exited, new Promise(r => setTimeout(() => { child.kill('SIGKILL'); r(null) }, 2000))])
+    }
+  })
+
+  await waitFor(async () => stdout.includes('READY') ? true : (child.exitCode !== null ? Promise.reject(new Error(`Python exited early: ${stderr}`)) : undefined))
+
+  await h.api<Message>('POST', `/api/channels/${general.id}/messages`, owner.token, { content: '@hermes_media generate report' }, 201)
+  const finalMsg = await waitFor(async () => {
+    const page = await h.api<MessagePage>('GET', `/api/channels/${general.id}/messages`, owner.token)
+    return page.messages.find(m => m.author_id === bot.user_id && m.status === 'done' && m.content.includes('Final answer'))
+  })
+  expect(finalMsg.content).toBe('Final answer after tool progress and uploads')
+  expect(finalMsg.blocks.filter(b => b.type === 'tool_call')).toHaveLength(2)
+
+  const page = await h.api<MessagePage>('GET', `/api/channels/${general.id}/messages`, owner.token)
+  const imgMsg = page.messages.find(m => m.content === 'Generated chart')
+  const docMsg = page.messages.find(m => m.content === 'Attached PDF')
+  expect(imgMsg?.blocks).toContainEqual(expect.objectContaining({ type: 'attachment', name: 'chart.png', mime: 'image/png' }))
+  expect(docMsg?.blocks).toContainEqual(expect.objectContaining({ type: 'attachment', name: 'report.pdf', mime: 'application/pdf' }))
+
+  child.stdin.write('QUIT\n')
+  child.stdin.end()
+  const [code] = await exited
+  expect(code, stderr).toBe(0)
+})

@@ -11,12 +11,14 @@ import asyncio
 import base64
 import hashlib
 import json
+import mimetypes
 import os
 import ssl
 import struct
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from typing import Any, Dict, Optional, Tuple
 
 try:
@@ -166,11 +168,14 @@ class StdlibWebSocket:
             data = bytes(b ^ mask[i & 3] for i, b in enumerate(data))
         return fin, opcode, data
 
-    async def recv(self) -> str:
+    async def recv(self, timeout: float = 75.0) -> str:
         chunks: list[bytes] = []
         while True:
             try:
-                fin, opcode, data = await self._read_frame()
+                fin, opcode, data = await asyncio.wait_for(self._read_frame(), timeout=timeout)
+            except asyncio.TimeoutError as exc:
+                self._closed = True
+                raise WebSocketClosed(1006, "Read timeout") from exc
             except asyncio.IncompleteReadError as exc:
                 self._closed = True
                 raise WebSocketClosed(1006, "EOF") from exc
@@ -204,10 +209,12 @@ class _WebsocketsCompat:
     async def ping(self) -> None:
         await self._conn.ping()
 
-    async def recv(self) -> str:
+    async def recv(self, timeout: float = 75.0) -> str:
         try:
-            msg = await self._conn.recv()
+            msg = await asyncio.wait_for(self._conn.recv(), timeout=timeout)
             return msg if isinstance(msg, str) else msg.decode("utf-8")
+        except asyncio.TimeoutError as exc:
+            raise WebSocketClosed(1006, "Read timeout") from exc
         except Exception as exc:
             code = getattr(exc, "code", 1006)
             reason = getattr(exc, "reason", str(exc))
@@ -276,3 +283,61 @@ async def http_json(
                 payload = resp.text
             return resp.status_code, payload
     return await asyncio.to_thread(_urllib_json_sync, method, url, headers or {}, body, timeout)
+
+
+def _urllib_upload_sync(
+    url: str,
+    field_name: str,
+    filename: str,
+    data: bytes,
+    content_type: str,
+    headers: Dict[str, str],
+    timeout: float,
+) -> Tuple[int, Any]:
+    boundary = f"----ChlorIMBoundary{uuid.uuid4().hex}"
+    safe_name = filename.replace('"', "_").replace("\r", "_").replace("\n", "_")
+    head = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="{field_name}"; filename="{safe_name}"\r\n'
+        f"Content-Type: {content_type}\r\n\r\n"
+    ).encode("utf-8")
+    tail = f"\r\n--{boundary}--\r\n".encode("utf-8")
+    body = head + data + tail
+    req_headers = {
+        **headers,
+        "Content-Type": f"multipart/form-data; boundary={boundary}",
+        "Content-Length": str(len(body)),
+    }
+    request = urllib.request.Request(url, data=body, headers=req_headers, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", "replace")
+            return resp.status, (json.loads(raw) if raw else None)
+    except urllib.error.HTTPError as err:
+        raw = err.read().decode("utf-8", "replace")
+        try:
+            parsed = json.loads(raw) if raw else None
+        except Exception:
+            parsed = raw
+        return err.code, parsed
+
+
+async def http_upload(
+    url: str,
+    field_name: str,
+    filename: str,
+    data: bytes,
+    content_type: Optional[str] = None,
+    headers: Optional[Dict[str, str]] = None,
+    timeout: float = 30.0,
+) -> Tuple[int, Any]:
+    mime = content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    if _httpx is not None:
+        async with _httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(url, headers=headers, files={field_name: (filename, data, mime)})
+            try:
+                payload = resp.json()
+            except Exception:
+                payload = resp.text
+            return resp.status_code, payload
+    return await asyncio.to_thread(_urllib_upload_sync, url, field_name, filename, data, mime, headers or {}, timeout)

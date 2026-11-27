@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 import inspect
 import json
 import logging
+import mimetypes
 import os
 import re
 import socket
@@ -26,9 +27,9 @@ import urllib.parse
 import uuid
 
 try:
-    from .ws_client import WebSocketClosed, http_json, open_websocket
+    from .ws_client import WebSocketClosed, http_json, http_upload, open_websocket
 except ImportError:
-    from ws_client import WebSocketClosed, http_json, open_websocket  # type: ignore[no-redef]
+    from ws_client import WebSocketClosed, http_json, http_upload, open_websocket  # type: ignore[no-redef]
 
 logger = logging.getLogger(__name__)
 
@@ -690,7 +691,9 @@ class ChlorIMAdapter(BasePlatformAdapter):
         active = self._runs_by_message.get(message_id)
         if active is not None and not active.finished and self._ws is not None:
             await self._emit_structured_content(active, content, is_final=finalize)
-            if finalize and not active.finished:
+            # Only finalize the run when actual prose has been emitted; tool-only progress edits
+            # may pass finalize=True before Hermes sends the real final reply.
+            if finalize and not active.finished and active.emitted:
                 await self._finish_run(active)
             return SendResult(success=True, message_id=message_id)
 
@@ -705,6 +708,112 @@ class ChlorIMAdapter(BasePlatformAdapter):
             return SendResult(success=True, message_id=message_id)
         err = payload.get("error", {}).get("message") if isinstance(payload, dict) else str(payload)
         return SendResult(success=False, error=f"HTTP {status}: {err}")
+
+    async def delete_message(self, chat_id: str, message_id: str) -> bool:
+        # Never delete the active streaming ChlorIM bubble when Hermes dismisses a progress bubble.
+        if message_id in self._runs_by_message:
+            return True
+        status, _ = await http_json(
+            "DELETE",
+            f"{self.http_base}/api/messages/{urllib.parse.quote(message_id, safe='')}",
+            headers=self._auth_headers,
+        )
+        return 200 <= status < 300
+
+    async def _upload_and_post_file(
+        self,
+        chat_id: str,
+        path_or_url: str,
+        caption: Optional[str] = None,
+        *,
+        file_name: Optional[str] = None,
+        is_image: bool = False,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        target = str(path_or_url or "").strip()
+        if not target:
+            return SendResult(success=False, error="Empty file path or URL")
+
+        meta = metadata or {}
+        thread_id = meta.get("thread_id") or meta.get("thread_root_id")
+
+        if target.startswith(("http://", "https://")):
+            md = f"![{file_name or 'image'}]({target})" if is_image else f"[{file_name or target}]({target})"
+            text = f"{caption.strip()}\n\n{md}" if caption and caption.strip() else md
+            return await self.send(chat_id, text, reply_to=reply_to, metadata=metadata)
+
+        expanded = os.path.expanduser(target)
+        if not os.path.isfile(expanded):
+            return SendResult(success=False, error=f"File not found: {target}")
+
+        name = file_name or os.path.basename(expanded) or ("image.png" if is_image else "attachment")
+        mime = mimetypes.guess_type(name)[0] or ("image/png" if is_image else "application/octet-stream")
+        try:
+            with open(expanded, "rb") as fh:
+                raw_bytes = fh.read()
+        except OSError as exc:
+            return SendResult(success=False, error=f"Failed to read file: {exc}")
+
+        up_status, up_payload = await http_upload(
+            f"{self.http_base}/api/uploads",
+            "file",
+            name,
+            raw_bytes,
+            content_type=mime,
+            headers=self._auth_headers,
+        )
+        if not (200 <= up_status < 300) or not isinstance(up_payload, dict):
+            err = up_payload.get("error", {}).get("message") if isinstance(up_payload, dict) else str(up_payload)
+            return SendResult(success=False, error=f"Upload failed (HTTP {up_status}): {err}")
+
+        body: Dict[str, Any] = {
+            "content": (caption or "").strip(),
+            "attachments": [up_payload],
+        }
+        if thread_id:
+            body["thread_root_id"] = thread_id
+        if reply_to:
+            body["reply_to_id"] = reply_to
+        status, payload = await http_json(
+            "POST",
+            f"{self.http_base}/api/channels/{urllib.parse.quote(chat_id, safe='')}/messages",
+            headers=self._auth_headers,
+            body=body,
+        )
+        if 200 <= status < 300 and isinstance(payload, dict):
+            return SendResult(success=True, message_id=str(payload.get("id", "")))
+        err = payload.get("error", {}).get("message") if isinstance(payload, dict) else str(payload)
+        return SendResult(success=False, error=f"HTTP {status}: {err}")
+
+    async def send_image(
+        self,
+        chat_id: str,
+        image_url: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **_kwargs: Any,
+    ) -> SendResult:
+        return await self._upload_and_post_file(
+            chat_id, image_url, caption=caption, is_image=True, reply_to=reply_to, metadata=metadata,
+        )
+
+    async def send_document(
+        self,
+        chat_id: str,
+        file_path: str,
+        caption: Optional[str] = None,
+        file_name: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **_kwargs: Any,
+    ) -> SendResult:
+        return await self._upload_and_post_file(
+            chat_id, file_path, caption=caption, file_name=file_name, is_image=False, reply_to=reply_to, metadata=metadata,
+        )
+
+    send_file = send_document
 
     # ------------------------------------------------------------------
     # WebSocket loop & ChlorIM Bridge protocol handling
@@ -796,7 +905,7 @@ class ChlorIMAdapter(BasePlatformAdapter):
                     "driver": "hermes",
                     "cwd": self.cwd,
                     "allowed_roots": self.allowed_roots,
-                    "version": "0.3.0",
+                    "version": "0.4.5",
                 })
                 self._mark_connected()
                 self._ready_event.set()

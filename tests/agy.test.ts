@@ -21,8 +21,8 @@ test('runs native agy in NDJSON mode, streams typed events and resumes with the 
 import assert from 'node:assert/strict'
 const args = process.argv.slice(2)
 const resumed = args.includes('--conversation')
-assert.deepEqual(args, ['-p', '--output-format', 'stream-json', '--mode', 'plan', '--input-format', 'stream-json', '--model', 'fixture-model',
-  ...(resumed ? ['--conversation', 'agy-session'] : [])])
+assert.deepEqual(args, ['--output-format', 'stream-json', '--input-format', 'stream-json', '--mode', 'plan', '--model', 'fixture-model',
+  ...(resumed ? ['--conversation', 'agy-session'] : []), '-p', ''])
 const chunks = []
 for await (const chunk of process.stdin) chunks.push(chunk)
 const envelope = JSON.parse(Buffer.concat(chunks).toString())

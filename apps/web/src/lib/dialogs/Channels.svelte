@@ -3,7 +3,7 @@
   import { ArrowUp, ChevronRight, Copy, Folder, FolderOpen, LogOut, Plus, Sparkles, Trash2, UserMinus, Users, Webhook as WebhookIcon } from 'lucide-svelte'
   import { addMembersSchema, channelCreateSchema, channelPatchSchema, channelSchema, okResponseSchema } from '@chiorim/shared'
   import type { BridgeFsList, Channel, CreateChannelRequest, CreatedWebhook, Webhook } from '@chiorim/shared'
-  import { api, copyText, createWebhook, deleteWebhook, errorText, listBridgeFs, listWebhooks, remove } from '$lib/api'
+  import { api, copyText, createWebhook, deleteWebhook, errorText, listBridgeFs, listHostFs, listWebhooks, remove } from '$lib/api'
   import Avatar from '$lib/components/Avatar.svelte'
   import type { Workspace } from '$lib/stores/workspace.svelte'
 
@@ -36,14 +36,19 @@
 
   const selectedWs = $derived(workspace.workspaces.find(ws => ws.id === workspaceId))
   const hostOnline = $derived(Boolean(selectedWs?.host_bot_id && (workspace.presence[selectedWs.host_bot_id]?.online ?? workspace.directory[selectedWs.host_bot_id]?.online)))
+  const canBrowseSubfolder = $derived(selectedWs?.host_bot_id ? hostOnline : Boolean(selectedWs))
 
   async function browseSubfolder(targetPath?: string) {
-    if (!selectedWs?.host_bot_id) return
+    if (!selectedWs) return
+    if (selectedWs.host_bot_id && !hostOnline) return
     pickerOpen = true
     fsLoading = true
     fsError = ''
     try {
-      fsData = await listBridgeFs(selectedWs.host_bot_id, targetPath ?? (selectedWs.work_dir || undefined))
+      const initial = targetPath ?? (selectedWs.work_dir || undefined)
+      fsData = selectedWs.host_bot_id
+        ? await listBridgeFs(selectedWs.host_bot_id, initial)
+        : await listHostFs(initial)
     } catch (failure) {
       fsError = errorText(failure)
       fsData = null
@@ -230,7 +235,8 @@
       {/if}
       {#if workspace.workspaces.length}
         <label>所属文件夹分组
-          <select bind:value={workspaceId} disabled={Boolean(room && !canManage)}>
+          <select bind:value={workspaceId} disabled={Boolean(room && !canManage)}
+            onchange={() => { pickerOpen = false; fsData = null; fsError = '' }}>
             {#each workspace.workspaces as ws (ws.id)}
               <option value={ws.id}>{ws.name}{ws.work_dir ? ` (${ws.work_dir})` : ''}</option>
             {/each}
@@ -244,9 +250,9 @@
     <label>
       <span class="label-row-between">
         <span class="label-with-icon"><FolderOpen size={13} /> 绑定目录 / 子文件夹（可选）</span>
-        {#if hostOnline && (!room || canManage)}
+        {#if canBrowseSubfolder && (!room || canManage)}
           <button type="button" class="choice-quick" onclick={() => pickerOpen ? (pickerOpen = false) : void browseSubfolder()}>
-            {pickerOpen ? '收起目录' : '从设备浏览子目录'}
+            {pickerOpen ? '收起目录' : '浏览子目录'}
           </button>
         {/if}
       </span>
@@ -257,10 +263,10 @@
       {/if}
     </label>
 
-    {#if pickerOpen && selectedWs?.host_bot_id}
+    {#if pickerOpen}
       <div class="remote-browser">
         <div class="remote-browser-head">
-          <span class="remote-path"><FolderOpen size={12} /> {fsData?.path || '设备目录'}</span>
+          <span class="remote-path"><FolderOpen size={12} /> {fsData?.path || '文件夹目录'}</span>
           {#if fsData && fsData.parent !== null}
             <button type="button" class="button quiet compact" disabled={fsLoading} onclick={() => void browseSubfolder(fsData?.parent || undefined)}>
               <ArrowUp size={12} /> 上一级

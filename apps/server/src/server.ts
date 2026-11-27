@@ -40,7 +40,7 @@ export function createChiorServer(options: ServerOptions = {}): ChiorServer {
       localRunner.setServerUrl(`http://127.0.0.1:${addr.port}`)
     }
   })
-  const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 })
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024 * 1024 })
   const live = new Map<WebSocket, boolean>()
   let closing = false
 
@@ -59,7 +59,9 @@ export function createChiorServer(options: ServerOptions = {}): ChiorServer {
     if (url.pathname === '/ws/client') {
       // A TLS-terminating proxy forwards the same Host and an HTTPS Origin.
       const origin = request.headers.origin
-      if (!allowedOrigin(origin, url.origin) && !allowedOrigin(origin, url.origin.replace(/^http:/, 'https:'))) {
+      const fwdHost = typeof request.headers['x-forwarded-host'] === 'string' ? request.headers['x-forwarded-host'] : undefined
+      const fwdProto = typeof request.headers['x-forwarded-proto'] === 'string' ? request.headers['x-forwarded-proto'].split(',')[0]?.trim() : undefined
+      if (!allowedOrigin(origin, url.origin, fwdHost, fwdProto) && !allowedOrigin(origin, url.origin.replace(/^http:/, 'https:'), fwdHost, fwdProto)) {
         return reject(socket, '403 Forbidden')
       }
       const token = cookieToken(request)

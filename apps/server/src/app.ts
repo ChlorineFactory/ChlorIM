@@ -53,7 +53,7 @@ export type Services = OpenDatabase & {
 
 type ChiorApp = Services & ReturnType<typeof createIdentity> & {
   app: App
-  allowedOrigin(origin: string | undefined, self: string): boolean
+  allowedOrigin(origin: string | undefined, self: string, forwardedHost?: string, forwardedProto?: string): boolean
 }
 
 function createServices(options: ServerOptions): Services {
@@ -70,7 +70,15 @@ function createServices(options: ServerOptions): Services {
 export function createApp(options: ServerOptions = {}): ChiorApp {
   const services = createServices(options)
   const origins = new Set(options.corsOrigins ?? ['http://localhost:5173'])
-  const allowedOrigin = (origin: string | undefined, self: string) => !origin || origin === self || origins.has(origin)
+  const allowedOrigin = (origin: string | undefined, self: string, forwardedHost?: string, forwardedProto?: string) => {
+    if (!origin || origin === self || origins.has(origin)) return true
+    if (forwardedProto === 'https' && origin === self.replace(/^http:/, 'https:')) return true
+    if (forwardedHost) {
+      const cleanHost = forwardedHost.split(',')[0]?.trim()
+      if (cleanHost && (origin === `https://${cleanHost}` || origin === `http://${cleanHost}`)) return true
+    }
+    return false
+  }
   const uploadLimit = options.uploadLimit ?? 10 * 1024 * 1024
   const publicUploads = options.publicUploads ?? false
   const app: App = new Hono()
@@ -117,7 +125,9 @@ export function createApp(options: ServerOptions = {}): ChiorApp {
   })
   app.notFound(c => c.json({ error: { code: 'NOT_FOUND', message: 'Endpoint not found' } }, 404))
   const browserCors = cors({
-    origin: (origin, c) => allowedOrigin(origin, new URL(c.req.url).origin) ? origin : undefined,
+    origin: (origin, c) => allowedOrigin(
+      origin, new URL(c.req.url).origin, c.req.header('X-Forwarded-Host'), c.req.header('X-Forwarded-Proto')?.split(',')[0]?.trim(),
+    ) ? origin : undefined,
     credentials: true,
     allowMethods: ['GET', 'HEAD', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
     allowHeaders: ['Content-Type', 'Authorization'],
@@ -129,7 +139,9 @@ export function createApp(options: ServerOptions = {}): ChiorApp {
     const method = c.req.method
     const path = url.pathname
     const incomingWebhook = method === 'POST' && /^\/api\/webhooks\/in\/[^/]+$/.test(path)
-    if (method !== 'GET' && method !== 'HEAD' && !incomingWebhook && !allowedOrigin(c.req.header('Origin'), url.origin)) {
+    if (method !== 'GET' && method !== 'HEAD' && !incomingWebhook && !allowedOrigin(
+      c.req.header('Origin'), url.origin, c.req.header('X-Forwarded-Host'), c.req.header('X-Forwarded-Proto')?.split(',')[0]?.trim(),
+    )) {
       fail(403, 'ORIGIN_DENIED', 'Origin is not permitted')
     }
     if (((method === 'GET' || method === 'HEAD') && ['/api/health', '/api/auth/bootstrap', '/api/auth/session'].includes(path)) ||

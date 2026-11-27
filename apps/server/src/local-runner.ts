@@ -319,9 +319,10 @@ async function runAntigravity(
   model: string | null, signal: AbortSignal, emit: (delta: Delta) => void,
 ) {
   const mode = { readonly: 'plan', default: 'accept-edits', auto: 'auto' }[permissionMode]
-  const args = ['-p', '--output-format', 'stream-json', '--mode', mode, '--input-format', 'stream-json']
+  const args = ['--output-format', 'stream-json', '--input-format', 'stream-json', '--mode', mode]
   if (model) args.push('--model', model)
   if (request.external_session_id) args.push('--conversation', sessionArgument(request.external_session_id))
+  args.push('-p', '')
   const input = JSON.stringify({ event: 'user', message: { content: conversationPrompt(request) } }) + '\n'
   let session: string | undefined
   let complete = false

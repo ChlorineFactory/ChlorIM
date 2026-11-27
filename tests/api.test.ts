@@ -232,3 +232,28 @@ test('accepts source names with blank browser MIME and keeps explicit MIME intac
     name: 'View.svelte', mime: 'text/plain', size: file.size,
   })
 })
+
+test('permits HTTPS reverse-proxy Origin via X-Forwarded headers while rejecting foreign Origins', async () => {
+  const h = await harness()
+  const admin = await h.person('admin')
+  const okProxy = await h.raw('PATCH', '/api/users/me', admin.token, { bio: 'via-proxy' }, {
+    Origin: 'https://chat.example.com',
+    'X-Forwarded-Proto': 'https',
+    'X-Forwarded-Host': 'chat.example.com',
+  })
+  expect(okProxy.status).toBe(200)
+  expect(okProxy.headers.get('Access-Control-Allow-Origin')).toBe('https://chat.example.com')
+
+  const okHttpsSameHost = await h.raw('PATCH', '/api/users/me', admin.token, { bio: 'via-https' }, {
+    Origin: h.url.replace(/^http:/, 'https:'),
+    'X-Forwarded-Proto': 'https',
+  })
+  expect(okHttpsSameHost.status).toBe(200)
+
+  const evil = await h.raw('PATCH', '/api/users/me', admin.token, { bio: 'csrf' }, {
+    Origin: 'https://evil.example',
+    'X-Forwarded-Proto': 'https',
+    'X-Forwarded-Host': 'chat.example.com',
+  })
+  expect(evil.status).toBe(403)
+})

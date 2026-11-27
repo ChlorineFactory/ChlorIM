@@ -104,9 +104,10 @@ const antigravity: AgentDriver = {
     if (config.env.CHIOR_ANTIGRAVITY_BACKEND === 'python') return python()
 
     const mode = { readonly: 'plan', default: 'accept-edits', auto: 'auto' }[config.permission_mode]
-    const args = ['-p', '--output-format', 'stream-json', '--mode', mode, '--input-format', 'stream-json']
+    const args = ['--output-format', 'stream-json', '--input-format', 'stream-json', '--mode', mode]
     if (config.model) args.push('--model', config.model)
     if (request.external_session_id) args.push('--conversation', sessionArgument(request.external_session_id))
+    args.push('-p', '')
     const input = JSON.stringify({ event: 'user', message: { content: conversationPrompt(request) } }) + '\n'
     let session: string | undefined
     let complete = false
