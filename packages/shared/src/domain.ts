@@ -8,7 +8,8 @@ export const providerTypeSchema = z.enum(['openai_compat', 'anthropic', 'gemini'
 export const botModeSchema = z.enum(['provider', 'local', 'bridge'])
 export const triggerPolicySchema = z.enum(['mention', 'always', 'dm_only'])
 export const driverSchema = z.enum(['claude-code', 'codex', 'hermes', 'antigravity', 'custom'])
-export const localDriverSchema = z.enum(['claude-code', 'codex', 'hermes', 'antigravity'])
+export const localDriverSchema = z.enum(['claude-code', 'codex', 'antigravity'])
+export const bridgeDriverSchema = z.enum(['claude-code', 'codex', 'antigravity', 'custom'])
 export const permissionModeSchema = z.enum(['readonly', 'default', 'auto'])
 export const messageStatusSchema = z.enum(['queued', 'streaming', 'done', 'aborted', 'error'])
 export const idSchema = z.string().min(1).max(128)
@@ -138,6 +139,7 @@ export const botSchema = botSummarySchema.extend({
 export const localAgentDriverStatusSchema = z.object({
   available: z.boolean(),
   binary: z.string(),
+  path: z.string().nullable().optional(),
 })
 export const localAgentStatusSchema = z.object({
   enabled: z.boolean(),
@@ -148,7 +150,6 @@ export const localAgentStatusSchema = z.object({
     codex: localAgentDriverStatusSchema,
     'claude-code': localAgentDriverStatusSchema,
     antigravity: localAgentDriverStatusSchema,
-    hermes: localAgentDriverStatusSchema,
   }),
 })
 export const inviteSchema = z.object({

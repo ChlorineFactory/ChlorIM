@@ -4,7 +4,6 @@ import { accessSync, constants, existsSync, lstatSync, mkdirSync, readdirSync, r
 import { homedir, hostname } from 'node:os'
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
-import { readSse } from '@chiorim/shared'
 import type { BridgeFsList, BridgeRuntime, Delta, LocalAgentStatus, LocalDriverName, PermissionMode, RunStart, ToolCall } from '@chiorim/shared'
 import type { BotRow } from './db.js'
 import { ApiFailure } from './errors.js'
@@ -21,7 +20,6 @@ const DRIVER_BINARIES: Record<LocalDriverName, string> = {
   codex: 'codex',
   'claude-code': 'claude',
   antigravity: 'agy',
-  hermes: 'hermes',
 }
 
 function expandHome(value: string) {
@@ -35,20 +33,60 @@ function isWithinRoots(targetReal: string, roots: string[]) {
   })
 }
 
-function hasExecutable(binary: string, env: NodeJS.ProcessEnv) {
-  const pathValue = env.PATH ?? ''
+function candidateBinDirs(env: NodeJS.ProcessEnv): string[] {
+  const home = env.HOME?.trim() || homedir()
+  const dirs = new Set<string>()
+  for (const part of (env.PATH ?? '').split(delimiter)) {
+    if (part.trim()) dirs.add(part.trim())
+  }
+  const extra = [
+    join(home, '.local', 'bin'),
+    join(home, '.bun', 'bin'),
+    join(home, '.npm-global', 'bin'),
+    join(home, '.npm', 'bin'),
+    join(home, '.pnpm'),
+    join(home, '.local', 'share', 'pnpm'),
+    join(home, '.volta', 'bin'),
+    join(home, '.fnm', 'current', 'bin'),
+    join(home, '.asdf', 'shims'),
+    join(home, '.mise', 'shims'),
+    join(home, '.cargo', 'bin'),
+    join(home, 'bin'),
+  ]
+  if (process.platform !== 'win32') {
+    extra.push('/opt/homebrew/bin', '/opt/homebrew/sbin', '/usr/local/bin', '/usr/bin', '/bin')
+  }
+  // Include newest nvm-managed Node bin directory if present (common on Ubuntu/macOS).
+  const nvmDir = join(home, '.nvm', 'versions', 'node')
+  try {
+    const versions = readdirSync(nvmDir).sort((a, b) => b.localeCompare(a, undefined, { numeric: true }))
+    for (const ver of versions.slice(0, 3)) extra.push(join(nvmDir, ver, 'bin'))
+  } catch { /* nvm not installed */ }
+
+  for (const dir of extra) {
+    try {
+      if (statSync(dir).isDirectory()) dirs.add(dir)
+    } catch { /* Directory does not exist */ }
+  }
+  return [...dirs]
+}
+
+function withAugmentedPath(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return { ...env, PATH: candidateBinDirs(env).join(delimiter) }
+}
+
+function resolveExecutable(binary: string, env: NodeJS.ProcessEnv): string | null {
   const exts = process.platform === 'win32' ? (env.PATHEXT ?? '.EXE;.CMD;.BAT').split(';') : ['']
-  for (const dir of pathValue.split(delimiter)) {
-    if (!dir) continue
+  for (const dir of candidateBinDirs(env)) {
     for (const ext of exts) {
       const candidate = join(dir, binary + ext)
       try {
         accessSync(candidate, process.platform === 'win32' ? constants.F_OK : constants.X_OK)
-        if (statSync(candidate).isFile()) return true
+        if (statSync(candidate).isFile()) return candidate
       } catch { /* Try next directory */ }
     }
   }
-  return false
+  return null
 }
 
 const conversationPrompt = (request: RunStart) => JSON.stringify({
@@ -74,9 +112,11 @@ async function* processJson(
   executable: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, signal: AbortSignal, input: string,
 ): AsyncGenerator<Record<string, unknown>> {
   signal.throwIfAborted()
+  const runEnv = withAugmentedPath(env)
+  const resolvedBin = resolveExecutable(executable, runEnv) ?? executable
   const useGroup = process.platform !== 'win32'
-  const child = spawn(executable, args, {
-    cwd, env, detached: useGroup, stdio: ['pipe', 'pipe', 'pipe'],
+  const child = spawn(resolvedBin, args, {
+    cwd, env: runEnv, detached: useGroup, stdio: ['pipe', 'pipe', 'pipe'],
   })
   let stderr = ''
   let spawnError: Error | undefined
@@ -325,41 +365,6 @@ async function runAntigravity(
   return session
 }
 
-async function runHermes(
-  request: RunStart, env: NodeJS.ProcessEnv, model: string | null, signal: AbortSignal, emit: (delta: Delta) => void,
-) {
-  const endpoint = (env.HERMES_ENDPOINT ?? 'http://127.0.0.1:8642/v1/chat/completions').replace(/\/$/, '')
-  const url = endpoint.endsWith('/chat/completions') ? endpoint : endpoint + '/chat/completions'
-  const apiKey = env.HERMES_API_KEY
-  const response = await fetch(url, {
-    method: 'POST', signal, redirect: 'error',
-    headers: {
-      'Content-Type': 'application/json', 'X-Hermes-Session-Id': request.scope_key,
-      ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
-    },
-    body: JSON.stringify({
-      model: model || 'hermes-agent', stream: true,
-      messages: [{ role: 'user', content: conversationPrompt(request) }],
-    }),
-  })
-  let received = false
-  for await (const data of readSse(response)) {
-    if (data === '[DONE]') return request.scope_key
-    const value = JSON.parse(data) as {
-      error?: unknown
-      choices?: { delta?: { reasoning_content?: string; reasoning?: string; content?: string } }[]
-    }
-    if (value.error) throw new Error('Hermes reported a stream error')
-    const delta = value.choices?.[0]?.delta
-    const thinking = delta?.reasoning_content ?? delta?.reasoning
-    if (typeof thinking === 'string' && thinking) emit({ part: 'thinking', delta: thinking })
-    if (typeof delta?.content === 'string' && delta.content) emit({ part: 'text', delta: delta.content })
-    received = true
-  }
-  if (!received) throw new Error('Hermes returned an empty stream')
-  return request.scope_key
-}
-
 function parseRepoUrl(raw: string): { url: string; defaultName: string } {
   const value = raw.trim()
   if (!value || value.startsWith('-') || /[\s\0]/.test(value) || value.includes('..')) {
@@ -571,11 +576,15 @@ export function createLocalRunner(options: LocalAgentOptions = {}) {
   function detectDrivers(): LocalAgentStatus['drivers'] {
     if (!customEnv && cachedDrivers && Date.now() - cachedDrivers.at < 15_000) return cachedDrivers.value
     const env = mergedEnv()
+    const check = (name: LocalDriverName) => {
+      const binary = DRIVER_BINARIES[name]
+      const found = resolveExecutable(binary, env)
+      return { available: Boolean(found), binary, path: found }
+    }
     const value: LocalAgentStatus['drivers'] = {
-      codex: { available: hasExecutable(DRIVER_BINARIES.codex, env), binary: DRIVER_BINARIES.codex },
-      'claude-code': { available: hasExecutable(DRIVER_BINARIES['claude-code'], env), binary: DRIVER_BINARIES['claude-code'] },
-      antigravity: { available: hasExecutable(DRIVER_BINARIES.antigravity, env), binary: DRIVER_BINARIES.antigravity },
-      hermes: { available: Boolean(env.HERMES_ENDPOINT) || hasExecutable(DRIVER_BINARIES.hermes, env), binary: DRIVER_BINARIES.hermes },
+      codex: check('codex'),
+      'claude-code': check('claude-code'),
+      antigravity: check('antigravity'),
     }
     if (!customEnv) cachedDrivers = { at: Date.now(), value }
     return value
@@ -593,7 +602,7 @@ export function createLocalRunner(options: LocalAgentOptions = {}) {
 
   function runtimeMeta(bot: BotRow): BridgeRuntime | undefined {
     if (!enabled || bot.mode !== 'local') return undefined
-    const driver = (bot.driver_hint && bot.driver_hint !== 'custom' ? bot.driver_hint : 'codex') as LocalDriverName
+    const driver = (bot.driver_hint === 'claude-code' || bot.driver_hint === 'antigravity' ? bot.driver_hint : 'codex') as LocalDriverName
     let cwd = defaultCwd()
     if (bot.local_cwd) {
       try { cwd = resolveDir(bot.local_cwd) } catch { /* Fall back to defaultCwd */ }
@@ -613,7 +622,7 @@ export function createLocalRunner(options: LocalAgentOptions = {}) {
   ): Promise<string | undefined> {
     if (!enabled) throw new Error('Local agent execution is disabled on this server')
     const driver = (bot.driver_hint ?? 'codex') as LocalDriverName
-    if (!(['codex', 'claude-code', 'antigravity', 'hermes'] as const).includes(driver)) {
+    if (!(['codex', 'claude-code', 'antigravity'] as const).includes(driver)) {
       throw new Error(`Unsupported local agent driver: ${String(bot.driver_hint)}`)
     }
     const cwd = resolveDir(request.work_dir, bot.local_cwd)
@@ -628,7 +637,6 @@ export function createLocalRunner(options: LocalAgentOptions = {}) {
       case 'codex': return runCodex(request, cwd, env, permission, bot.model, signal, emit)
       case 'claude-code': return runClaude(request, cwd, env, permission, bot.model, signal, emit)
       case 'antigravity': return runAntigravity(request, cwd, env, permission, bot.model, signal, emit)
-      case 'hermes': return runHermes(request, env, bot.model, signal, emit)
     }
   }
 

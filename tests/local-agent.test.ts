@@ -189,6 +189,47 @@ test('blocks local agent creation when disabled via server option', async () => 
   }, 400)
 })
 
+test('auto-discovers CLIs in ~/.bun/bin and ~/.local/bin under minimal PATH and separates Hermes native credentials', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'chiorim-paths-'))
+  cleanup(() => rmSync(root, { recursive: true, force: true }))
+  const fakeHome = join(root, 'ubuntu')
+  const bunBin = join(fakeHome, '.bun', 'bin')
+  const localBin = join(fakeHome, '.local', 'bin')
+  mkdirSync(bunBin, { recursive: true })
+  mkdirSync(localBin, { recursive: true })
+  for (const file of [join(bunBin, 'codex'), join(localBin, 'claude'), join(localBin, 'agy')]) {
+    writeFileSync(file, '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+    chmodSync(file, 0o755)
+  }
+
+  const h = await harness({
+    localAgent: {
+      enabled: true,
+      allowedRoots: [fakeHome],
+      defaultCwd: fakeHome,
+      env: { HOME: fakeHome, PATH: '/usr/bin:/bin' },
+    },
+  })
+  const admin = await h.person('admin')
+  const status = await h.api<LocalAgentStatus>('GET', '/api/local-agents/status', admin.token)
+  expect(status.drivers.codex).toMatchObject({ available: true, path: join(bunBin, 'codex') })
+  expect(status.drivers['claude-code']).toMatchObject({ available: true, path: join(localBin, 'claude') })
+  expect(status.drivers.antigravity).toMatchObject({ available: true, path: join(localBin, 'agy') })
+  expect('hermes' in status.drivers).toBe(false)
+
+  // Hermes is rejected in local CLI mode and gets dedicated Hermes plugin credentials in native mode.
+  await h.api('POST', '/api/bots', admin.token, {
+    mode: 'local', username: 'bad_hermes', display_name: 'Hermes', driver_hint: 'hermes',
+  }, 400)
+  const hermesBot = await h.api<BotWriteResponse>('POST', '/api/bots', admin.token, {
+    mode: 'bridge', username: 'hermes_native', display_name: 'Hermes', driver_hint: 'hermes',
+  }, 201)
+  expect(hermesBot.connect_command).toContain('CHLORIM_URL=')
+  expect(hermesBot.connect_command).toContain('CHLORIM_BOT_TOKEN=')
+  expect(hermesBot.connect_command).toContain('hermes plugins enable chlorim')
+  expect(hermesBot.connect_command).not.toContain('chior-bridge')
+})
+
 test('manages host folders (mkdir, delete, git clone) and lets local AI create channels, react, and post replies', async () => {
   const root = mkdtempSync(join(tmpdir(), 'chiorim-hostfs-'))
   cleanup(() => rmSync(root, { recursive: true, force: true }))

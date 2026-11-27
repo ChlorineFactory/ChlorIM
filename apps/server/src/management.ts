@@ -87,6 +87,13 @@ export function registerManagement(app: App, services: Services, chatRoutes: Ret
       const host = request.header('X-Forwarded-Host')?.split(',')[0]?.trim() || request.header('Host')?.trim() || parsed.host
       origin = `${proto === 'https' ? 'wss' : 'ws'}://${host}`
     }
+    if (driver === 'hermes') {
+      const httpOrigin = origin.replace(/^ws:/, 'http:').replace(/^wss:/, 'https:')
+      return {
+        bot_token: token,
+        connect_command: `export CHLORIM_URL=${quote(httpOrigin)}\nexport CHLORIM_BOT_TOKEN=${quote(token)}\nhermes plugins enable chlorim`,
+      }
+    }
     return { bot_token: token, connect_command: `chior-bridge add --url ${quote(origin)} --token ${quote(token)} --driver ${quote(driver ?? 'codex')} --name ${quote(username)}` }
   }
 
@@ -149,7 +156,9 @@ export function registerManagement(app: App, services: Services, chatRoutes: Ret
     if (input.mode === 'local') {
       adminOnly(owner)
       if (!localRunner.enabled) fail(400, 'LOCAL_AGENT_DISABLED', 'Local agent execution is disabled on this server')
-      if (input.driver_hint === 'custom') fail(400, 'INVALID_BOT', 'Custom shell drivers are only allowed in Bridge mode')
+      if (input.driver_hint === 'custom' || input.driver_hint === 'hermes') {
+        fail(400, 'INVALID_BOT', 'Local direct mode supports codex, claude-code, and antigravity only; use Hermes native integration for Hermes')
+      }
       if (input.local_cwd) localRunner.resolveDir(input.local_cwd)
     }
     const token = input.mode === 'bridge' ? `chior_bot_${randomHex()}` : undefined
@@ -184,7 +193,9 @@ export function registerManagement(app: App, services: Services, chatRoutes: Ret
     const bot = manageBot(c.req.param('id'), c.get('user'))
     if (bot.mode === 'local') {
       adminOnly(c.get('user'))
-      if (settings.driver_hint === 'custom') fail(400, 'INVALID_BOT', 'Custom shell drivers are only allowed in Bridge mode')
+      if (settings.driver_hint === 'custom' || settings.driver_hint === 'hermes') {
+        fail(400, 'INVALID_BOT', 'Local direct mode supports codex, claude-code, and antigravity only')
+      }
       if (settings.local_cwd) localRunner.resolveDir(settings.local_cwd)
     }
     if (settings.provider_id) providerRow(settings.provider_id)

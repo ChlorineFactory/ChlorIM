@@ -1,6 +1,39 @@
 import { spawn } from 'node:child_process'
+import { readdirSync, statSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { delimiter, join } from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
 import type { AgentConfig } from './config.js'
+
+function augmentedPath(env: NodeJS.ProcessEnv) {
+  const home = env.HOME?.trim() || homedir()
+  const dirs = new Set<string>((env.PATH ?? '').split(delimiter).map(d => d.trim()).filter(Boolean))
+  const extra = [
+    join(home, '.local', 'bin'),
+    join(home, '.bun', 'bin'),
+    join(home, '.npm-global', 'bin'),
+    join(home, '.npm', 'bin'),
+    join(home, '.pnpm'),
+    join(home, '.local', 'share', 'pnpm'),
+    join(home, '.volta', 'bin'),
+    join(home, '.fnm', 'current', 'bin'),
+    join(home, '.asdf', 'shims'),
+    join(home, '.mise', 'shims'),
+    join(home, '.cargo', 'bin'),
+    join(home, 'bin'),
+  ]
+  if (process.platform !== 'win32') extra.push('/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin')
+  try {
+    const nvmDir = join(home, '.nvm', 'versions', 'node')
+    for (const ver of readdirSync(nvmDir).sort((a, b) => b.localeCompare(a, undefined, { numeric: true })).slice(0, 3)) {
+      extra.push(join(nvmDir, ver, 'bin'))
+    }
+  } catch { /* nvm not installed */ }
+  for (const dir of extra) {
+    try { if (statSync(dir).isDirectory()) dirs.add(dir) } catch { /* ignore */ }
+  }
+  return [...dirs].join(delimiter)
+}
 
 /** Runs a single executable with a separate process group so cancellation reaches descendants. */
 export async function* processJson(
@@ -8,8 +41,10 @@ export async function* processJson(
 ): AsyncGenerator<Record<string, unknown>> {
   signal.throwIfAborted()
   const useGroup = process.platform !== 'win32'
+  const baseEnv = { ...process.env, ...config.env }
+  const env = config.env.PATH !== undefined ? baseEnv : { ...baseEnv, PATH: augmentedPath(baseEnv) }
   const child = spawn(executable, args, {
-    cwd: config.cwd, env: { ...process.env, ...config.env }, detached: useGroup, stdio: ['pipe', 'pipe', 'pipe'],
+    cwd: config.cwd, env, detached: useGroup, stdio: ['pipe', 'pipe', 'pipe'],
   })
   let stderr = ''
   let spawnError: Error | undefined

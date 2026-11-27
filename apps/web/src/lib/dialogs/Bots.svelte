@@ -17,7 +17,7 @@
   let providers = $state<Provider[]>([])
   let form = $state<Bot | 'new' | null>(null)
   let template = $state<BotTemplate | undefined>(undefined)
-  let credentials = $state<BotCredentials | null>(null)
+  let credentials = $state<(BotCredentials & { isHermes?: boolean }) | null>(null)
   let reveal = $state(false)
   let busy = $state(false)
   let error = $state('')
@@ -51,9 +51,10 @@
     form = null
     template = undefined
     if (bot_token && connect_command) {
-      credentials = { bot_token, connect_command }
+      const isHermes = bot.driver_hint === 'hermes'
+      credentials = { bot_token, connect_command, isHermes }
       reveal = false
-      workspace.toast('远程设备 Agent 已创建，请复制下方一次性连接命令', 'success')
+      workspace.toast(isHermes ? 'Hermes 账号已创建，请复制下方配置填入 ~/.hermes/.env' : '远程设备 Agent 已创建，请复制下方一次性连接命令', 'success')
     } else if (bot.mode === 'local') {
       workspace.toast('本机直连 Agent 已创建并就绪，无需安装 Bridge', 'success')
     } else {
@@ -92,15 +93,19 @@
   }
 
   async function rotate(bot: Bot) {
+    const isHermes = bot.driver_hint === 'hermes'
     const ok = await workspace.confirm({
-      title: '轮换 Bridge Token',
-      description: `轮换 ${bot.user.display_name} 的 Token 后，当前本机 Bridge 连接会立即断开，需要使用新命令重新添加。`,
+      title: isHermes ? '轮换 Hermes Token' : '轮换 Bridge Token',
+      description: isHermes
+        ? `轮换 ${bot.user.display_name} 的 Token 后，当前 Hermes 插件连接会立即断开，需要更新 ~/.hermes/.env 中的 CHLORIM_BOT_TOKEN。`
+        : `轮换 ${bot.user.display_name} 的 Token 后，当前本机 Bridge 连接会立即断开，需要使用新命令重新添加。`,
       confirmLabel: '确认轮换',
       danger: true,
     })
     if (!ok) return
     await action(async () => {
-      credentials = await api(`/bots/${bot.user_id}/rotate-token`, botCredentialsSchema, 'POST')
+      const next = await api(`/bots/${bot.user_id}/rotate-token`, botCredentialsSchema, 'POST')
+      credentials = { ...next, isHermes }
       reveal = false
       form = null
       workspace.toast('新 Token 已签发', 'success')
@@ -160,8 +165,8 @@
 
   {#if credentials}
     <section class="credentials-card">
-      <h3><KeyRound size={16} /> 一次性 Bridge 凭据</h3>
-      <p>请立刻复制保存连接命令或 Token（关闭后不可再查看，只可轮换重签）。</p>
+      <h3><KeyRound size={16} /> {credentials.isHermes ? '一次性 Hermes 平台凭据' : '一次性 Bridge 凭据'}</h3>
+      <p>请立刻复制保存{credentials.isHermes ? '配置命令' : '连接命令'}或 Token（关闭后不可再查看，只可轮换重签）。</p>
       <div class="secret-row">
         <code>{reveal ? credentials.bot_token : 'chior_bot_••••••••••••••••••••••••'}</code>
         <button type="button" class="icon-button" aria-label={reveal ? '隐藏 Token' : '显示 Token'} onclick={() => { reveal = !reveal }}>
@@ -172,11 +177,15 @@
         </button>
       </div>
       <div class="row-actions" style="justify-content: flex-start;">
-        <button type="button" class="button primary" onclick={() => void copy(credentials!.connect_command, '连接命令')}>
-          <Terminal size={15} /> 复制 chior-bridge 连接命令
+        <button type="button" class="button primary" onclick={() => void copy(credentials!.connect_command, credentials!.isHermes ? 'Hermes 配置命令' : '连接命令')}>
+          <Terminal size={15} /> {credentials.isHermes ? '复制 Hermes 接入配置' : '复制 chior-bridge 连接命令'}
         </button>
       </div>
-      <p class="muted">可追加 <code>--cwd &lt;项目目录&gt; --allowed-roots &lt;根目录&gt;</code>，然后执行 <code>chior-bridge service install</code> 安装为开机后台服务。</p>
+      {#if credentials.isHermes}
+        <p class="muted">先在 Hermes 所在机器执行 <code>bash packages/hermes-adapter/install.sh</code> 安装插件，再将 <code>CHLORIM_URL</code> 与 <code>CHLORIM_BOT_TOKEN</code> 写入 <code>~/.hermes/.env</code>。</p>
+      {:else}
+        <p class="muted">可追加 <code>--cwd &lt;项目目录&gt; --allowed-roots &lt;根目录&gt;</code>，然后执行 <code>chior-bridge start</code> 或 <code>chior-bridge service install</code>。</p>
+      {/if}
     </section>
   {/if}
 
@@ -204,7 +213,7 @@
               <small>@{bot.user.username} · {bot.mode === 'provider' ? (bot.model ?? '未配模型') : (member?.bot?.runtime_meta?.driver ?? bot.driver_hint ?? bot.mode)}</small>
             </span>
           </div>
-          <span class="bot-tag">{bot.mode === 'local' ? 'LOCAL DIRECT' : bot.mode === 'bridge' ? 'BRIDGE AGENT' : 'MODEL BOT'}</span>
+          <span class="bot-tag">{bot.mode === 'local' ? 'LOCAL DIRECT' : bot.mode === 'bridge' && bot.driver_hint === 'hermes' ? 'HERMES' : bot.mode === 'bridge' ? 'REMOTE BRIDGE' : 'MODEL BOT'}</span>
         </div>
 
         {#if member?.bot?.runtime_meta?.cwd}

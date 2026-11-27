@@ -1,13 +1,20 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte'
   import { FolderOpen } from 'lucide-svelte'
-  import { botCreateSchema, botPatchSchema, botSchema, botWriteResponseSchema, driverSchema, localDriverSchema } from '@chiorim/shared'
-  import type { Bot, BotWriteResponse, Channel, CreateBotRequest, DriverName, LocalAgentStatus, LocalDriverName, PermissionMode, Provider, Workspace as FolderGroup } from '@chiorim/shared'
+  import {
+    botCreateSchema, botPatchSchema, botSchema, botWriteResponseSchema, bridgeDriverSchema, localDriverSchema,
+  } from '@chiorim/shared'
+  import type {
+    Bot, BotWriteResponse, Channel, CreateBotRequest, DriverName, LocalAgentStatus, LocalDriverName,
+    PermissionMode, Provider, Workspace as FolderGroup,
+  } from '@chiorim/shared'
   import { api, errorText, getLocalAgentStatus } from '$lib/api'
   import { shortPath } from '$lib/format'
   import type { BotTemplate } from '$lib/presets'
   import AvatarField from '$lib/components/AvatarField.svelte'
   import RoomIcon from '$lib/components/RoomIcon.svelte'
+
+  type UiMode = 'local' | 'hermes' | 'bridge' | 'provider'
 
   let { initial, template, isAdmin = false, providers, folders, rooms, close, saved }: {
     initial?: Bot
@@ -20,24 +27,33 @@
     saved: (result: BotWriteResponse) => void
   } = $props()
 
-  const defaultMode = untrack((): CreateBotRequest['mode'] => {
-    const requested = initial?.mode ?? template?.mode ?? 'provider'
-    if (!initial && requested === 'local' && !isAdmin) return 'bridge'
-    return requested
+  const defaultUiMode = untrack((): UiMode => {
+    const rawMode = initial?.mode ?? template?.mode ?? 'provider'
+    const rawDriver = initial?.driver_hint ?? template?.driver_hint
+    if (rawMode === 'bridge' && rawDriver === 'hermes') return 'hermes'
+    if (!initial && rawMode === 'local' && !isAdmin) return 'bridge'
+    return rawMode
   })
 
-  let mode = $state<CreateBotRequest['mode']>(defaultMode)
+  let uiMode = $state<UiMode>(defaultUiMode)
   let name = $state(untrack(() => initial?.user.display_name ?? template?.display_name ?? ''))
   let username = $state(untrack(() => initial?.user.username ?? template?.username ?? ''))
   let avatar = $state(untrack(() => initial?.user.avatar_url ?? template?.avatar_url ?? ''))
   let bio = $state(untrack(() => initial?.user.bio ?? template?.bio ?? ''))
   let trigger = $state<NonNullable<CreateBotRequest['trigger_policy']>>(untrack(() => initial?.trigger_policy ?? 'mention'))
   let provider = $state(untrack(() => initial?.provider_id ?? (providers[0]?.id ?? '')))
-  let model = $state(untrack(() => initial?.model ?? (defaultMode === 'provider' ? (providers[0]?.models[0] ?? '') : '')))
+  let model = $state(untrack(() => initial?.model ?? (defaultUiMode === 'provider' ? (providers[0]?.models[0] ?? '') : '')))
   let prompt = $state(untrack(() => initial?.system_prompt ?? template?.system_prompt ?? ''))
   let temperature = $state<number | undefined>(untrack(() => initial?.temperature ?? 0.7))
   let context = $state<number | undefined>(untrack(() => initial?.context_limit ?? 20))
-  let driver = $state<DriverName | ''>(untrack(() => initial?.driver_hint ?? template?.driver_hint ?? (defaultMode === 'local' ? 'codex' : '')))
+  let driver = $state<DriverName | ''>(untrack(() => {
+    const initialDriver = initial?.driver_hint ?? template?.driver_hint ?? ''
+    if (defaultUiMode === 'local') {
+      return initialDriver === 'claude-code' || initialDriver === 'antigravity' ? initialDriver : 'codex'
+    }
+    if (defaultUiMode === 'hermes') return 'hermes'
+    return initialDriver === 'hermes' ? '' : initialDriver
+  }))
   let localCwd = $state(untrack(() => initial?.local_cwd ?? ''))
   let permissionMode = $state<PermissionMode>(untrack(() => initial?.permission_mode ?? 'default'))
   let roomIds = $state<string[]>(untrack(() => rooms.filter(room => room.type === 'public').map(room => room.id)))
@@ -50,15 +66,18 @@
     void getLocalAgentStatus().then(status => { localStatus = status }).catch(() => {})
   })
 
+  const apiMode = $derived<CreateBotRequest['mode']>(uiMode === 'hermes' ? 'bridge' : uiMode)
   const models = $derived(providers.find(item => item.id === provider)?.models ?? [])
-  const localDriver = $derived<LocalDriverName>((driver && driver !== 'custom' ? driver : 'codex') as LocalDriverName)
+  const localDriver = $derived<LocalDriverName>(
+    driver === 'claude-code' || driver === 'antigravity' ? driver : 'codex',
+  )
   const localDriverInfo = $derived(localStatus?.drivers[localDriver])
   const valid = $derived(
-    mode === 'provider'
+    uiMode === 'provider'
       ? Boolean(provider && model.trim())
-      : mode === 'local'
+      : uiMode === 'local'
         ? Boolean(isAdmin && (!localStatus || localStatus.enabled))
-        : true
+        : true,
   )
 
   const groupedRooms = $derived.by(() => {
@@ -70,10 +89,14 @@
   })
 
   function onModeChange() {
-    if (mode === 'local') {
-      if (!driver || driver === 'custom') driver = 'codex'
+    if (uiMode === 'local') {
+      if (driver !== 'codex' && driver !== 'claude-code' && driver !== 'antigravity') driver = 'codex'
       if (!initial && providers.some(p => p.models.includes(model))) model = ''
-    } else if (mode === 'provider' && !model && providers.length) {
+    } else if (uiMode === 'hermes') {
+      driver = 'hermes'
+    } else if (uiMode === 'bridge') {
+      if (driver === 'hermes') driver = ''
+    } else if (uiMode === 'provider' && !model && providers.length) {
       model = providers.find(item => item.id === provider)?.models[0] ?? ''
     }
   }
@@ -96,20 +119,22 @@
     error = ''
     try {
       const profile = { display_name: name, avatar_url: avatar.trim() || null, bio, trigger_policy: trigger }
-      const settings = mode === 'provider'
+      const settings = uiMode === 'provider'
         ? { provider_id: provider, model, system_prompt: prompt, temperature, context_limit: context }
-        : mode === 'local'
+        : uiMode === 'local'
           ? {
             driver_hint: localDriver,
             model: model.trim() || null,
             local_cwd: localCwd.trim() || null,
             permission_mode: permissionMode,
           }
-          : { driver_hint: driver || null }
+          : uiMode === 'hermes'
+            ? { driver_hint: 'hermes' as const }
+            : { driver_hint: (driver && driver !== 'hermes' ? driver : null) }
       const bot = initial
         ? await api('/bots/' + initial.user_id, botSchema, 'PATCH', botPatchSchema.parse({ ...profile, ...settings }))
         : await api('/bots', botWriteResponseSchema, 'POST', botCreateSchema.parse({
-          ...profile, ...settings, username: username.trim().toLowerCase(), mode, channel_ids: roomIds,
+          ...profile, ...settings, username: username.trim().toLowerCase(), mode: apiMode, channel_ids: roomIds,
         }))
       saved(bot)
     } catch (failure) { error = errorText(failure) } finally { busy = false }
@@ -120,11 +145,12 @@
   <h3>{initial ? '编辑 ' + initial.user.display_name : template ? `创建 · ${template.label}` : '创建 Bot'}</h3>
 
   <label>模式
-    <select bind:value={mode} disabled={Boolean(initial)} onchange={onModeChange}>
+    <select bind:value={uiMode} disabled={Boolean(initial)} onchange={onModeChange}>
       <option value="local" disabled={!isAdmin || Boolean(localStatus && !localStatus.enabled)}>
-        本机直连 Agent（免装 Bridge，直接调用服务器本机 CLI）{!isAdmin ? ' · 仅管理员' : localStatus && !localStatus.enabled ? ' · 已关闭' : ''}
+        本机直连 Agent（免装 Bridge，直接调用服务器本机 codex / claude / agy）{!isAdmin ? ' · 仅管理员' : localStatus && !localStatus.enabled ? ' · 已关闭' : ''}
       </option>
-      <option value="bridge">远程设备 Agent（通过 chior-bridge / Hermes 插件从其他设备接入）</option>
+      <option value="hermes">Hermes 原生接入（独立平台适配器，直接在 Hermes 中配置 Token 接入）</option>
+      <option value="bridge">远程设备 Agent（通过 chior-bridge 从其他电脑或 Docker 宿主机接入）</option>
       <option value="provider">托管模型 Bot（通过 Provider API 调用）</option>
     </select>
   </label>
@@ -147,7 +173,7 @@
     </select>
   </label>
 
-  {#if mode === 'provider'}
+  {#if uiMode === 'provider'}
     <div class="form-row two">
       <label>Provider
         <select bind:value={provider} required>
@@ -166,7 +192,7 @@
       <label>Temperature<input type="number" bind:value={temperature} min="0" max="2" step="0.01" required /></label>
       <label>上下文条数<input type="number" bind:value={context} min="1" max="100" step="1" required /></label>
     </div>
-  {:else if mode === 'local'}
+  {:else if uiMode === 'local'}
     <div class="form-row two">
       <label>本机 CLI 驱动
         <select bind:value={driver}>
@@ -189,11 +215,11 @@
 
     {#if localStatus && localDriverInfo && !localDriverInfo.available}
       <p class="form-error" role="status">
-        当前服务器未在 PATH 中检测到 <code>{localDriverInfo.binary}</code>。如果 ChlorIM 运行在 Docker 容器中，或 Agent 在另一台电脑上，请改选上方的「远程设备 Agent」。
+        当前服务进程未检测到 <code>{localDriverInfo.binary}</code>（已自动扫描 PATH、<code>~/.local/bin</code>、<code>~/.bun/bin</code>、nvm 等目录）。如果 ChlorIM 运行在 <strong>Docker 容器</strong>中，容器看不到宿主机 CLI——请改用宿主机直跑 <code>chiorim-server</code> 二进制，或选择「远程设备 Agent」。
       </p>
     {:else if localStatus}
-      <p class="muted">
-        服务端将直接在 <code>{localStatus.hostname}</code> 本机执行 <code>{localDriverInfo?.binary ?? localDriver}</code>，无需安装 <code>chior-bridge</code>。
+      <p class="muted break-text">
+        服务端将在 <code>{localStatus.hostname}</code> 直接调用 <code>{localDriverInfo?.path ?? localDriverInfo?.binary ?? localDriver}</code>，无需安装 <code>chior-bridge</code>。
       </p>
     {/if}
 
@@ -206,14 +232,18 @@
         <input bind:value={model} maxlength={256} spellcheck={false} placeholder="留空使用 CLI 默认模型" />
       </label>
     </div>
+  {:else if uiMode === 'hermes'}
+    <p class="muted">
+      Hermes 使用独立的原生平台插件（<code>packages/hermes-adapter</code>）接入，<strong>无需安装 <code>chior-bridge</code></strong>。创建后会签发一次性 <code>CHLORIM_BOT_TOKEN</code>，填进 <code>~/.hermes/.env</code> 并启用插件即可双向收发、流式回复与 Cron 主动推送。
+    </p>
   {:else}
-    <label>驱动类型
+    <label>远程设备驱动类型
       <select bind:value={driver}>
         <option value="">默认（codex）</option>
-        {#each driverSchema.options as item}<option value={item}>{item}</option>{/each}
+        {#each bridgeDriverSchema.options as item}<option value={item}>{item}</option>{/each}
       </select>
     </label>
-    <p class="muted">创建后会生成一次性 Token 与 <code>chior-bridge</code> 连接命令，适合接入其他电脑或 Docker 宿主机上的 Agent。</p>
+    <p class="muted">创建后会生成一次性 Token 与 <code>chior-bridge</code> 连接命令，适合接入另一台电脑或 Docker 宿主机上的 CLI Agent。</p>
   {/if}
 
   {#if !initial && rooms.length}

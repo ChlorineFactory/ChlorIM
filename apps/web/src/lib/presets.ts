@@ -83,12 +83,12 @@ export const BOT_TEMPLATES: BotTemplate[] = [
   {
     id: 'hermes',
     label: 'Hermes',
-    hint: 'Hermes 插件 / Bridge',
+    hint: '独立原生平台插件',
     mode: 'bridge',
     display_name: 'Hermes',
     username: 'hermes',
     avatar_url: 'preset:hermes',
-    bio: 'Hermes Gateway 原生适配',
+    bio: 'Hermes Agent 原生平台接入',
     driver_hint: 'hermes',
   },
   {
