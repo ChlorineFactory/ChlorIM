@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import {
   bridgeFsEntrySchema, channelSchema, contextEntrySchema, idSchema, memberSchema, messageSchema,
-  reactionSummarySchema, runtimeSchema, senderSchema, toolSchema, userSchema, workspaceSchema,
+  promptBlockSchema, reactionSummarySchema, runtimeSchema, senderSchema, toolSchema, userSchema, workspaceSchema,
 } from './domain.js'
 import { hasMessageContent, messageFields } from './rest.js'
 
@@ -10,11 +10,15 @@ const ping = z.object({ type: z.literal('ping') })
 const pong = z.object({ type: z.literal('pong') })
 const nonce = z.string().min(1).max(128)
 export const deltaSchema = z.object({
-  part: z.enum(['text', 'thinking', 'tool_start', 'tool_end']),
-  delta: z.string().max(256_000).optional(), tool: toolSchema.optional(),
+  part: z.enum(['text', 'thinking', 'tool_start', 'tool_end', 'prompt']),
+  delta: z.string().max(256_000).optional(), tool: toolSchema.optional(), prompt: promptBlockSchema.optional(),
 })
 const validDelta = (value: z.infer<typeof deltaSchema>) =>
-  value.part === 'text' || value.part === 'thinking' ? value.delta !== undefined : value.tool !== undefined
+  value.part === 'text' || value.part === 'thinking'
+    ? value.delta !== undefined
+    : value.part === 'prompt'
+      ? value.prompt !== undefined
+      : value.tool !== undefined
 
 export const clientUpSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('message.send'), channel_id: idSchema, ...messageFields, client_nonce: nonce.optional() }),
@@ -70,6 +74,13 @@ export const runStartSchema = z.object({
 export const bridgeDownSchema = z.discriminatedUnion('type', [
   senderSchema.omit({ id: true }).extend({ type: z.literal('bridge.welcome'), bot_id: idSchema }),
   runStartSchema,
+  z.object({
+    type: z.literal('run.input'),
+    run_id: idSchema,
+    prompt_id: idSchema.optional(),
+    content: z.string().max(60_000),
+    sender: senderSchema,
+  }),
   z.object({ type: z.literal('run.abort'), run_id: idSchema }),
   z.object({ type: z.literal('fs.list'), request_id: idSchema, path: z.string().max(4096).optional() }),
   ping,

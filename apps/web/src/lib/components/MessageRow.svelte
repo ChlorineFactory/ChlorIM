@@ -1,14 +1,14 @@
 <script lang="ts">
   import {
-    Bookmark, Brain, Check, CheckCircle2, ChevronDown, Circle, Clock, CornerUpLeft, MessageSquare,
-    MoreHorizontal, Pencil, Pin, PinOff, Quote, RotateCcw, SmilePlus, Square, Trash2, Webhook, Wrench, X,
+    Bookmark, Brain, Check, CheckCircle2, ChevronDown, Circle, Clock, CornerUpLeft, HelpCircle, MessageSquare,
+    MoreHorizontal, Pencil, Pin, PinOff, Quote, RotateCcw, Send, ShieldAlert, SmilePlus, Square, Trash2, Webhook, Wrench, X,
   } from 'lucide-svelte'
   import type { Attachment as FileAttachment, Message, User } from '@chiorim/shared'
   import { messagePatchSchema, messageSchema } from '@chiorim/shared'
   import Avatar from './Avatar.svelte'
   import Attachment from './Attachment.svelte'
   import Markdown from './Markdown.svelte'
-  import { api, errorText, remove } from '$lib/api'
+  import { api, errorText, remove, respondPrompt } from '$lib/api'
   import { formatStamp, formatTime } from '$lib/format'
   import { QUICK_EMOJIS } from '$lib/presets'
   import type { Workspace } from '$lib/stores/workspace.svelte'
@@ -34,14 +34,29 @@
   const bookmarked = $derived(workspace.bookmarkIds.has(message.id))
   const highlighted = $derived(workspace.highlightedId === message.id)
   const thinking = $derived(message.blocks.filter(block => block.type === 'thinking').map(block => block.text).join('\n'))
+  const toolCalls = $derived(message.blocks.filter(block => block.type === 'tool_call'))
+  const runningTool = $derived([...toolCalls].reverse().find(block => block.status === 'running'))
+  const failedToolCount = $derived(toolCalls.filter(block => block.status === 'error').length)
+  const promptBlocks = $derived(message.blocks.filter(block => block.type === 'prompt'))
   const hasFiles = $derived(message.blocks.some(block => block.type === 'attachment'))
 
   let editing = $state(false)
   let emojiOpen = $state(false)
   let mobileActions = $state(false)
   let content = $state('')
+  let customReplies = $state<Record<string, string>>({})
   let busy = $state(false)
   let error = $state('')
+
+  function answerPrompt(promptId: string, value: string, label?: string) {
+    const trimmed = value.trim()
+    if (!trimmed) return
+    return action(async () => {
+      const updated = await respondPrompt(message.id, { prompt_id: promptId, value: trimmed, label })
+      workspace.applyMessage(updated)
+      customReplies = { ...customReplies, [promptId]: '' }
+    })
+  }
 
   function beginEdit() { mobileActions = false; content = message.content; error = ''; editing = true }
 
@@ -154,24 +169,84 @@
       </details>
     {/if}
 
-    {#each message.blocks.filter(block => block.type === 'tool_call') as block (block.id)}
-      <details class="tool-block">
+    {#if toolCalls.length}
+      <details class="tool-group">
         <summary>
           <Wrench size={13} />
-          <code>{block.name}</code>
-          <span class="tool-state" class:done={block.status === 'done'} class:failed={block.status === 'error'}>
-            {#if block.status === 'running'}<span class="spinner"></span> 运行中
-            {:else if block.status === 'done'}<Check size={13} /> 完成
-            {:else}<X size={13} /> 失败{/if}
-          </span>
+          {#if runningTool}
+            <span class="spinner"></span>
+            <span class="tool-group-title">正在执行工具（{toolCalls.length} 项 · <code>{runningTool.name}</code>）</span>
+          {:else}
+            <span class="tool-group-title">
+              工具调用（{toolCalls.length} 项{#if failedToolCount} · <span class="danger-text">{failedToolCount} 失败</span>{:else} · 已完成{/if}）
+            </span>
+          {/if}
           <ChevronDown size={13} />
         </summary>
-        <div class="tool-payload">
-          {#if block.input !== undefined}<span>输入</span><pre>{JSON.stringify(block.input, null, 2)}</pre>{/if}
-          {#if block.output !== undefined}<span>输出</span><pre>{JSON.stringify(block.output, null, 2)}</pre>{/if}
-          {#if block.input === undefined && block.output === undefined}<span>暂无工具详情</span>{/if}
+        <div class="tool-group-body">
+          {#each toolCalls as block (block.id)}
+            <details class="tool-block">
+              <summary>
+                <Wrench size={12} />
+                <code>{block.name}</code>
+                <span class="tool-state" class:done={block.status === 'done'} class:failed={block.status === 'error'}>
+                  {#if block.status === 'running'}<span class="spinner"></span> 运行中
+                  {:else if block.status === 'done'}<Check size={12} /> 完成
+                  {:else}<X size={12} /> 失败{/if}
+                </span>
+                <ChevronDown size={12} />
+              </summary>
+              <div class="tool-payload">
+                {#if block.input !== undefined}<span>输入</span><pre>{typeof block.input === 'string' ? block.input : JSON.stringify(block.input, null, 2)}</pre>{/if}
+                {#if block.output !== undefined}<span>输出</span><pre>{typeof block.output === 'string' ? block.output : JSON.stringify(block.output, null, 2)}</pre>{/if}
+                {#if block.input === undefined && block.output === undefined}<span>暂无工具详情</span>{/if}
+              </div>
+            </details>
+          {/each}
         </div>
       </details>
+    {/if}
+
+    {#each promptBlocks as prompt (prompt.id)}
+      <section class="prompt-card" class:approval={prompt.kind === 'approval'} class:resolved={Boolean(prompt.resolved_value)}>
+        <div class="prompt-card-head">
+          {#if prompt.kind === 'approval'}<ShieldAlert size={15} />{:else}<HelpCircle size={15} />{/if}
+          <strong>{prompt.title}</strong>
+        </div>
+        {#if prompt.description}
+          <pre class="prompt-desc">{prompt.description}</pre>
+        {/if}
+        {#if prompt.resolved_value}
+          <div class="prompt-resolved">
+            <Check size={13} />
+            <span>已回复：<strong>{prompt.resolved_label ?? prompt.resolved_value}</strong>{#if prompt.resolved_by} · {prompt.resolved_by}{/if}</span>
+          </div>
+        {:else}
+          <div class="prompt-options">
+            {#each prompt.options as opt (opt.value + opt.label)}
+              <button type="button"
+                class="button compact"
+                class:primary={opt.style === 'primary'}
+                class:danger={opt.style === 'danger'}
+                class:quiet={!opt.style || opt.style === 'default'}
+                disabled={busy || message.status !== 'streaming'}
+                onclick={() => void answerPrompt(prompt.id, opt.value, opt.label)}>
+                {opt.label}
+              </button>
+            {/each}
+          </div>
+          {#if prompt.allow_custom && message.status === 'streaming'}
+            <form class="prompt-custom-row" onsubmit={(e) => { e.preventDefault(); void answerPrompt(prompt.id, customReplies[prompt.id] ?? '') }}>
+              <input value={customReplies[prompt.id] ?? ''}
+                oninput={(e) => { customReplies = { ...customReplies, [prompt.id]: e.currentTarget.value } }}
+                placeholder="或输入自定义回答…" maxlength={4000} disabled={busy} />
+              <button type="submit" class="button primary compact" disabled={busy || !(customReplies[prompt.id] ?? '').trim()}>
+                <Send size={12} /> 发送
+              </button>
+            </form>
+          {/if}
+        {/if}
+      </section>
     {/each}
 
     {#if editing}

@@ -1,7 +1,7 @@
 import { and, eq, inArray, or, sql } from 'drizzle-orm'
 import {
   addMembersSchema, channelCreateSchema, channelPatchSchema, channelPreferenceSchema, dmCreateSchema, messagePatchSchema,
-  pageMessagesSchema, pinCreateSchema, reactionToggleSchema, readAckSchema, sendMessageSchema,
+  pageMessagesSchema, pinCreateSchema, reactionToggleSchema, readAckSchema, respondPromptSchema, sendMessageSchema,
   workspaceCreateSchema, workspacePatchSchema,
 } from '@chiorim/shared'
 import type { User } from '@chiorim/shared'
@@ -263,6 +263,11 @@ export function registerChat(app: App, services: Services) {
   })
 
   app.post('/api/messages/:id/regenerate', c => c.json(engine.regenerate(c.get('user'), c.req.param('id'))))
+
+  app.post('/api/messages/:id/respond', async c => {
+    const input = await body(c, respondPromptSchema)
+    return c.json(engine.respond(c.get('user'), c.req.param('id'), input))
+  })
 
   app.post('/api/messages/:id/reactions', async c => {
     const { emoji } = await body(c, reactionToggleSchema)

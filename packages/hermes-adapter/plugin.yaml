@@ -1,7 +1,7 @@
 name: chlorim
 label: ChlorIM
 kind: platform
-version: "0.4.2"
+version: "0.4.3"
 description: Native Hermes Gateway platform adapter for ChlorIM (supports streaming replies, folder browsing, offline queueing, and Cron delivery)
 entry_point: adapter.py
 requires_env:

@@ -82,6 +82,11 @@ export const readAckSchema = z.object({ last_read_message_id: idSchema })
 export const pinCreateSchema = z.object({ message_id: idSchema })
 export const reactionToggleSchema = z.object({ emoji: z.string().trim().min(1).max(32) })
 export const reactionToggleResponseSchema = z.object({ reactions: z.array(reactionSummarySchema) })
+export const respondPromptSchema = z.object({
+  prompt_id: idSchema.optional(),
+  value: z.string().trim().min(1).max(4000),
+  label: z.string().trim().min(1).max(400).optional(),
+})
 export const bookmarkCreateSchema = z.object({ message_id: idSchema, note: z.string().max(500).default('') })
 export const searchQuerySchema = z.object({
   q: z.string().trim().max(200).default(''),

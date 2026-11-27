@@ -478,12 +478,16 @@ code, pre { font-family: var(--mono); }
 .message-status .button, .stop-button { padding: 2px 8px; min-height: 22px; font-size: 11px; }
 .stream-caret { display: inline-block; width: 6px; height: 13px; background: var(--accent); border-radius: 1px; animation: breathe .9s ease-in-out infinite; }
 
-.thinking, .tool-block { width: min(100%, 540px); margin: 4px 0 6px; border: 1px solid var(--stroke); border-radius: 6px; background: var(--card); }
-.thinking summary, .tool-block summary { display: flex; align-items: center; gap: 6px; min-height: 28px; padding: 2px 9px; color: var(--muted); font-size: 11.5px; cursor: pointer; list-style: none; }
-.thinking summary::-webkit-details-marker, .tool-block summary::-webkit-details-marker { display: none; }
-.thinking summary > svg:last-child, .tool-block summary > svg:last-child { margin-left: auto; }
-.thinking[open] summary > svg:last-child, .tool-block[open] summary > svg:last-child { transform: rotate(180deg); }
-.thinking summary > svg:first-child { color: var(--accent-text); }
+.thinking, .tool-group, .tool-block { width: min(100%, 580px); margin: 4px 0 6px; border: 1px solid var(--stroke); border-radius: 6px; background: var(--card); }
+.thinking summary, .tool-group > summary, .tool-block summary { display: flex; align-items: center; gap: 6px; min-height: 28px; padding: 2px 9px; color: var(--muted); font-size: 11.5px; cursor: pointer; list-style: none; }
+.thinking summary::-webkit-details-marker, .tool-group > summary::-webkit-details-marker, .tool-block summary::-webkit-details-marker { display: none; }
+.thinking summary > svg:last-child, .tool-group > summary > svg:last-child, .tool-block summary > svg:last-child { margin-left: auto; flex: none; }
+.thinking[open] summary > svg:last-child, .tool-group[open] > summary > svg:last-child, .tool-block[open] summary > svg:last-child { transform: rotate(180deg); }
+.thinking summary > svg:first-child, .tool-group > summary > svg:first-child { color: var(--accent-text); flex: none; }
+.tool-group-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tool-group-title code { color: var(--text); }
+.tool-group-body { border-top: 1px solid var(--stroke); padding: 6px 8px; display: grid; gap: 4px; max-height: 360px; overflow-y: auto; }
+.tool-group-body .tool-block { width: 100%; margin: 0; background: var(--rail); }
 .thinking > div { white-space: pre-wrap; font-size: 12.5px; color: var(--muted); max-height: 300px; overflow: auto; border-top: 1px solid var(--stroke); padding: 8px 10px; }
 .thinking-pulse { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); animation: breathe .95s infinite; }
 .tool-block summary code { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -493,6 +497,29 @@ code, pre { font-family: var(--mono); }
 .tool-state .spinner { width: 10px; height: 10px; }
 .tool-payload { border-top: 1px solid var(--stroke); padding: 7px 10px; font-size: 11px; color: var(--muted); }
 .tool-payload pre { padding: 4px 0 8px; white-space: pre-wrap; max-height: 220px; overflow: auto; }
+
+.prompt-card {
+  width: min(100%, 580px); margin: 6px 0 8px; padding: 10px 12px;
+  border-radius: 7px; border: 1px solid var(--stroke-strong); border-left: 3px solid var(--accent);
+  background: var(--card); display: grid; gap: 8px;
+}
+.prompt-card.approval { border-left-color: var(--amber); background: rgba(245, 158, 11, 0.06); }
+.prompt-card.resolved { opacity: 0.85; border-left-color: var(--online); }
+.prompt-card-head { display: flex; align-items: flex-start; gap: 7px; font-size: 13px; color: var(--text); line-height: 1.4; }
+.prompt-card-head svg { color: var(--accent-text); flex: none; margin-top: 2px; }
+.prompt-card.approval .prompt-card-head svg { color: var(--amber); }
+.prompt-desc {
+  margin: 0; padding: 7px 9px; border-radius: 5px; background: var(--rail); border: 1px solid var(--stroke);
+  font: 500 12px/1.45 var(--mono); color: var(--body); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow-y: auto;
+}
+.prompt-options { display: flex; flex-wrap: wrap; gap: 6px; }
+.prompt-custom-row { display: flex; align-items: center; gap: 6px; }
+.prompt-custom-row input {
+  flex: 1; min-width: 0; min-height: 30px; padding: 4px 8px; border-radius: 6px;
+  border: 1px solid var(--stroke-strong); background: var(--field); color: var(--text); font-size: 12.5px;
+}
+.prompt-custom-row input:focus { outline: none; border-color: var(--accent); }
+.prompt-resolved { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--green-text); }
 .inline-edit { display: grid; gap: 6px; }
 .inline-edit textarea { background: var(--field); color: var(--text); border: 1px solid var(--stroke-strong); padding: 7px 9px; border-radius: 6px; }
 

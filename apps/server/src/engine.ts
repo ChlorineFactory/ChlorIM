@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { and, asc, eq, inArray } from 'drizzle-orm'
-import type { BridgeUp, Delta, MessageBlock, RunStart, ToolCall, User } from '@chiorim/shared'
+import type { BridgeUp, Delta, MessageBlock, PromptBlock, RunStart, ToolCall, User } from '@chiorim/shared'
 import { MAX_BOT_HOPS, publicUser } from './chat.js'
 import type { createChat } from './chat.js'
 import { bots, botSessions, channels, messages, providers, queuedRuns, users } from './db.js'
@@ -94,8 +94,8 @@ export function createEngine(db: Database, chat: ReturnType<typeof createChat>, 
 
   function applyDelta(run: Run, event: Delta) {
     if (active.get(run.request.message_id) !== run) return
-    const { part, tool, delta } = event
-    run.size += (delta?.length ?? 0) + (tool ? JSON.stringify(tool).length : 0)
+    const { part, tool, delta, prompt } = event
+    run.size += (delta?.length ?? 0) + (tool ? JSON.stringify(tool).length : 0) + (prompt ? JSON.stringify(prompt).length : 0)
     if (run.size > MAX_OUTPUT) {
       finish(run, 'error', 'Bot output exceeded the limit')
       return
@@ -112,13 +112,59 @@ export function createEngine(db: Database, chat: ReturnType<typeof createChat>, 
       if (previous) Object.assign(previous, update)
       else run.blocks.push({ ...update, type: 'tool_call' })
     }
+    if (prompt && part === 'prompt') {
+      const previous = run.blocks.find(block => block.type === 'prompt' && block.id === prompt.id)
+      const update: PromptBlock = { ...prompt }
+      if (previous) Object.assign(previous, update)
+      else run.blocks.push({ ...update, type: 'prompt' })
+      // Persist prompts immediately so refreshes preserve unresolved cards.
+      persist(run)
+    }
     realtime.publish({
       type: 'message.delta', channel_id: run.channelId, thread_root_id: run.request.thread_root_id,
-      message_id: run.request.message_id, part, delta, tool,
+      message_id: run.request.message_id, part, delta, tool, prompt,
     }, run.channelId)
     run.flush ??= setTimeout(() => {
       if (active.get(run.request.message_id) === run) persist(run)
     }, 200)
+  }
+
+  function deliverRunInput(run: Run, actor: User, value: string, promptId?: string, label?: string) {
+    if (!run.bridge) fail(409, 'NOT_INTERACTIVE', 'This active run cannot receive interactive input')
+    const targetPrompt = promptId
+      ? run.blocks.find(block => block.type === 'prompt' && block.id === promptId)
+      : [...run.blocks].reverse().find(block => block.type === 'prompt' && !block.resolved_value)
+    if (targetPrompt && targetPrompt.type === 'prompt') {
+      const matched = targetPrompt.options.find(opt => opt.value === value || opt.label === value)
+      targetPrompt.resolved_value = value
+      targetPrompt.resolved_label = label ?? matched?.label ?? value
+      targetPrompt.resolved_by = actor.display_name
+      const updated = persist(run)
+      if (updated) realtime.publish({ type: 'message.updated', message: chat.dto(updated) }, run.channelId)
+    }
+    // Reset timeout so long interactive sessions do not time out right after user responds.
+    if (run.timer) {
+      clearTimeout(run.timer)
+      run.timer = setTimeout(() => finish(run, 'error', 'Bot run timed out'), TIMEOUT)
+    }
+    if (!writeSocket(run.bridge.ws, {
+      type: 'run.input',
+      run_id: run.request.run_id,
+      prompt_id: targetPrompt?.type === 'prompt' ? targetPrompt.id : promptId,
+      content: value,
+      sender: { id: actor.id, username: actor.username, display_name: actor.display_name },
+    })) {
+      fail(503, 'DEVICE_OFFLINE', 'Bridge connection lost')
+    }
+    return chat.dto(chat.messageRow(run.request.message_id))
+  }
+
+  function respond(actor: User, messageId: string, input: { prompt_id?: string; value: string; label?: string }) {
+    const row = chat.messageRow(messageId)
+    chat.access(row.channel_id, actor.id)
+    const run = active.get(messageId)
+    if (!run || !run.bridge) fail(409, 'RUN_NOT_ACTIVE', 'This prompt is no longer active')
+    return deliverRunInput(run, actor, input.value, input.prompt_id, input.label)
   }
 
   async function stream(run: Run, bot: typeof bots.$inferSelect) {
@@ -228,12 +274,51 @@ export function createEngine(db: Database, chat: ReturnType<typeof createChat>, 
   function trigger(source: MessageRow, selected?: ReadonlySet<string>) {
     if (closed || source.bot_hop_count >= MAX_BOT_HOPS) return
     const room = chat.channelRow(source.channel_id)
+    const sender = chat.dto(source).author
     const mentions = new Set([...source.content.matchAll(/(?:^|\s)@([a-zA-Z0-9_-]{2,32})/g)].map(match => match[1].toLowerCase()))
+
+    // If a human replies directly to an active streaming Bridge run (via quote-reply or while it has an unresolved interactive prompt),
+    // route the message immediately as run.input instead of deadlocking behind the active run in the serial queue.
+    if (!selected && sender.kind === 'human') {
+      const scope = source.thread_root_id ? `thread:${source.thread_root_id}` : `channel:${room.id}`
+      const memberMap = new Map(chat.memberBots(room.id).map(item => [item.user.id, item]))
+      const quotedRun = source.reply_to_id ? active.get(source.reply_to_id) : undefined
+      let interactiveRun: Run | undefined
+      if (quotedRun && quotedRun.bridge && quotedRun.channelId === room.id && quotedRun.request.scope_key === scope) {
+        interactiveRun = quotedRun
+      } else {
+        const waiting = [...active.values()].filter(run =>
+          run.bridge && run.channelId === room.id && run.request.scope_key === scope
+          && run.blocks.some(block => block.type === 'prompt' && !block.resolved_value))
+        if (waiting.length === 1) {
+          const only = waiting[0]
+          const botUser = memberMap.get(only.botId)?.user
+          if (room.type === 'dm' || mentions.size === 0 || (botUser && mentions.has(botUser.username))) {
+            interactiveRun = only
+          }
+        } else if (waiting.length > 1) {
+          interactiveRun = waiting.find(run => {
+            const botUser = memberMap.get(run.botId)?.user
+            return Boolean(botUser && mentions.has(botUser.username))
+          })
+        }
+      }
+      if (interactiveRun) {
+        const botUsername = memberMap.get(interactiveRun.botId)?.user.username
+        const cleaned = botUsername
+          ? source.content.replace(new RegExp(`^(?:@${botUsername}\\b[\\s,，:：]*)+`, 'i'), '').trim() || source.content.trim()
+          : source.content.trim()
+        try {
+          deliverRunInput(interactiveRun, sender, cleaned)
+          return
+        } catch { /* Fall through to normal dispatch if bridge disconnected */ }
+      }
+    }
+
     const candidates = chat.memberBots(room.id).filter(({ bot, user }) => !user.disabled && bot.user_id !== source.author_id &&
       (selected ? selected.has(user.id) : room.type === 'dm' ||
         (bot.trigger_policy !== 'dm_only' && (bot.trigger_policy === 'always' || mentions.has(user.username)))))
     if (!candidates.length) return
-    const sender = chat.dto(source).author
     for (const { bot } of candidates) {
       const offline = bot.mode === 'bridge' && !realtime.runtime(bot.user_id)
       const row = chat.insert({
@@ -390,5 +475,5 @@ export function createEngine(db: Database, chat: ReturnType<typeof createChat>, 
     for (const run of [...active.values()]) finish(run, 'aborted')
   }
 
-  return { trigger, drainQueued, regenerate, botPostHops, resetSessions, bridgeEvent, disconnect, abort, cancelMessages, cancelBot, close }
+  return { trigger, drainQueued, regenerate, respond, botPostHops, resetSessions, bridgeEvent, disconnect, abort, cancelMessages, cancelBot, close }
 }

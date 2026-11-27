@@ -521,6 +521,11 @@ export class Workspace {
           if (index === -1) row.blocks.push({ ...event.tool, type: 'tool_call' })
           else row.blocks[index] = { ...row.blocks[index], ...event.tool, type: 'tool_call' }
         }
+        if (event.prompt) {
+          const index = row.blocks.findIndex(block => block.type === 'prompt' && block.id === event.prompt?.id)
+          if (index === -1) row.blocks.push({ ...event.prompt, type: 'prompt' })
+          else row.blocks[index] = { ...row.blocks[index], ...event.prompt, type: 'prompt' }
+        }
         if (Object.hasOwn(this.details, row.id)) this.details[row.id] = row
         return
       }

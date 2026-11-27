@@ -21,8 +21,9 @@ import logging
 import os
 import re
 import socket
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import urllib.parse
+import uuid
 
 try:
     from .ws_client import WebSocketClosed, http_json, open_websocket
@@ -179,6 +180,102 @@ def _is_within_roots(target_real: str, roots: List[str]) -> bool:
     return False
 
 
+_TOOL_LINE_RE = re.compile(
+    r"^(?:[\U0001F300-\U0001FAFF\u2600-\u27BF]\ufe0f?\s+)(.+)$"
+)
+_TOOL_PREFIX_EMOJIS = (
+    "💻", "⚙️", "⚙", "📚", "⏰", "🐍", "🔍", "🔎", "📄", "📝",
+    "🌐", "🛠️", "🛠", "🔧", "📦", "⚡", "🗂️", "🗂", "📁", "🧪", "📊", "📡", "🤖",
+)
+_CLARIFY_OPTION_RE = re.compile(r"^\s*(\d+)[\.\)）、]\s+(.+?)\s*$")
+
+
+def _classify_tool_line(line: str) -> Optional[Tuple[str, str]]:
+    """Return ``(tool_name, summary)`` if ``line`` looks like a Hermes tool progress line."""
+    stripped = line.strip()
+    if not stripped:
+        return None
+    if not any(stripped.startswith(prefix) for prefix in _TOOL_PREFIX_EMOJIS):
+        return None
+    match = _TOOL_LINE_RE.match(stripped)
+    body = match.group(1).strip() if match else stripped
+    if not body:
+        return None
+    if ":" in body[:36]:
+        head, rest = body.split(":", 1)
+        if re.fullmatch(r"[A-Za-z0-9_.\-/ ]{1,36}", head.strip()):
+            return head.strip()[:80], rest.strip() or body
+    words = body.split(None, 2)
+    if len(words) >= 2 and words[0].lower() in ("running", "reading", "searching", "scheduling", "executing", "calling", "writing", "editing", "fetching"):
+        name = f"{words[0]} {words[1]}" if words[1].lower() in ("skill", "code", "tool", "command") else words[0]
+        return name[:80], body
+    return body[:64], body
+
+
+def _parse_interactive_prompt(text: str) -> Optional[Dict[str, Any]]:
+    """Detect Hermes plain-text clarify or exec-approval prompts and convert to a structured prompt block."""
+    cleaned = text.strip()
+    if not cleaned:
+        return None
+    lines = [line.rstrip() for line in cleaned.splitlines()]
+
+    # 1. Hermes clarify prompt (e.g. "❓ ...\n1. Option A\n2. Option B\nReply with the number...")
+    options: List[Dict[str, Any]] = []
+    title_lines: List[str] = []
+    has_skip_hint = False
+    has_reply_hint = False
+    for line in lines:
+        s = line.strip()
+        if not s:
+            continue
+        if re.search(r'reply\s+"?skip"?\s+to\s+skip', s, re.I):
+            has_skip_hint = True
+            continue
+        if re.search(r"reply\s+with\s+the\s+number|reply\s+with\s+your\s+answer", s, re.I):
+            has_reply_hint = True
+            continue
+        opt_match = _CLARIFY_OPTION_RE.match(s)
+        if opt_match:
+            num, label = opt_match.group(1), opt_match.group(2).strip()
+            style = "primary" if re.search(r"\(recommended\)|推荐", label, re.I) else "default"
+            options.append({"label": label[:200], "value": num, "style": style})
+            continue
+        if not options:
+            title_lines.append(s)
+
+    if options and (has_reply_hint or has_skip_hint or cleaned.startswith("❓") or cleaned.startswith("?")):
+        title = "\n".join(title_lines).lstrip("❓? ").strip() or "请选择一项"
+        if has_skip_hint and not any(opt["value"].lower() == "skip" or opt["label"] in ("跳过", "Skip") for opt in options):
+            options.append({"label": "跳过", "value": "skip", "style": "default"})
+        return {
+            "id": f"clarify-{uuid.uuid4().hex[:10]}",
+            "kind": "choice",
+            "title": title[:2000],
+            "options": options[:20],
+            "allow_custom": True,
+        }
+
+    # 2. Hermes plain-text dangerous-command approval fallback
+    if re.search(r"(?:approval\s+required|dangerous\s+command|confirm\s+execution|需要.*审批|危险命令)", cleaned, re.I) and re.search(
+        r"\b(?:allow|approve|once|deny)\b|允许|拒绝", cleaned, re.I
+    ):
+        return {
+            "id": f"approval-{uuid.uuid4().hex[:10]}",
+            "kind": "approval",
+            "title": "需要执行权限确认",
+            "description": cleaned[:4000],
+            "options": [
+                {"label": "允许本次", "value": "once", "style": "primary"},
+                {"label": "本次会话允许", "value": "session", "style": "default"},
+                {"label": "始终允许", "value": "always", "style": "default"},
+                {"label": "拒绝", "value": "deny", "style": "danger"},
+            ],
+            "allow_custom": False,
+        }
+
+    return None
+
+
 @dataclass
 class _ActiveRun:
     run_id: str
@@ -188,9 +285,19 @@ class _ActiveRun:
     scope_key: str
     task: Optional[asyncio.Task[Any]] = None
     emitted: str = ""
+    raw_seen: str = ""
     finished: bool = False
     handler_started: asyncio.Event = field(default_factory=asyncio.Event)
     done_event: asyncio.Event = field(default_factory=asyncio.Event)
+    tool_seq: int = 0
+    active_tool: Optional[Dict[str, Any]] = None
+    seen_tool_lines: Set[str] = field(default_factory=set)
+    seen_prompts: Set[str] = field(default_factory=set)
+    pending_prompts: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+
+    @property
+    def has_output(self) -> bool:
+        return bool(self.emitted or self.tool_seq or self.pending_prompts)
 
 
 class ChlorIMAdapter(BasePlatformAdapter):
@@ -281,8 +388,11 @@ class ChlorIMAdapter(BasePlatformAdapter):
 
     def _find_run_for_event(self, event: Any) -> Optional[_ActiveRun]:
         msg_id = getattr(event, "message_id", None)
-        if isinstance(msg_id, str) and msg_id in self._runs_by_message:
-            return self._runs_by_message[msg_id]
+        if isinstance(msg_id, str):
+            if msg_id.startswith("input:"):
+                return None
+            if msg_id in self._runs_by_message:
+                return self._runs_by_message[msg_id]
         source = getattr(event, "source", None)
         chat_id = getattr(source, "chat_id", None)
         thread_id = getattr(source, "thread_id", None)
@@ -316,11 +426,11 @@ class ChlorIMAdapter(BasePlatformAdapter):
             if run is not None and not run.finished:
                 if isinstance(result, str) and result.strip():
                     if not run.emitted:
-                        await self.send(run.channel_id, result, metadata={"thread_id": run.thread_root_id})
+                        await self._emit_structured_content(run, result, is_final=True)
                     await self._finish_run(run)
                     # Return None so Hermes BasePlatformAdapter does not post a duplicate REST copy.
                     return None
-                if run.emitted:
+                if run.has_output:
                     await self._finish_run(run)
                     return None
                 # Handler returned nothing and emitted no deltas (e.g. unauthorized user dropped by Hermes).
@@ -358,6 +468,177 @@ class ChlorIMAdapter(BasePlatformAdapter):
                 return dict(self._channels_cache[chat_id])
         return {"id": chat_id, "name": chat_id, "type": "group"}
 
+    def _lookup_active_run(self, chat_id: str, thread_id: Optional[str] = None) -> Optional[_ActiveRun]:
+        active = self._runs_by_scope.get((chat_id, thread_id))
+        if active is None and thread_id is None:
+            for candidate in self._runs_by_scope.values():
+                if candidate.channel_id == chat_id and not candidate.finished:
+                    active = candidate
+                    break
+        return active if active is not None and not active.finished else None
+
+    async def _close_active_tool(self, run: _ActiveRun, status: str = "done") -> None:
+        if run.active_tool is None:
+            return
+        finished = {**run.active_tool, "status": status}
+        run.active_tool = None
+        await self._ws_send({
+            "type": "run.delta",
+            "run_id": run.run_id,
+            "part": "tool_end",
+            "tool": finished,
+        })
+
+    async def _emit_tool_line(self, run: _ActiveRun, line: str, name: str, detail: str) -> None:
+        if line in run.seen_tool_lines:
+            return
+        run.seen_tool_lines.add(line)
+        await self._close_active_tool(run, "done")
+        run.tool_seq += 1
+        tool = {
+            "id": f"hermes-tool-{run.tool_seq}",
+            "name": name,
+            "input": detail,
+            "status": "running",
+        }
+        run.active_tool = tool
+        await self._ws_send({
+            "type": "run.delta",
+            "run_id": run.run_id,
+            "part": "tool_start",
+            "tool": tool,
+        })
+
+    async def _emit_prompt(self, run: _ActiveRun, prompt_block: Dict[str, Any], meta: Optional[Dict[str, Any]] = None) -> None:
+        await self._close_active_tool(run, "done")
+        dedupe_key = f"{prompt_block.get('kind')}:{prompt_block.get('title')}:{len(prompt_block.get('options', []))}"
+        if dedupe_key in run.seen_prompts:
+            return
+        run.seen_prompts.add(dedupe_key)
+        run.pending_prompts[prompt_block["id"]] = meta or {"kind": prompt_block.get("kind")}
+        await self._ws_send({
+            "type": "run.delta",
+            "run_id": run.run_id,
+            "part": "prompt",
+            "prompt": prompt_block,
+        })
+
+    async def _emit_structured_content(self, run: _ActiveRun, content: str, *, is_final: bool = False) -> None:
+        if not content:
+            return
+        # 1. Check if the entire message is an interactive clarify / approval prompt.
+        prompt_block = _parse_interactive_prompt(content)
+        if prompt_block is not None:
+            await self._emit_prompt(run, prompt_block)
+            return
+
+        # 2. Separate tool progress lines from real prose lines.
+        prose_lines: List[str] = []
+        tool_lines_seen = False
+        for line in content.splitlines():
+            classified = _classify_tool_line(line)
+            if classified is not None:
+                tool_lines_seen = True
+                await self._emit_tool_line(run, line.strip(), classified[0], classified[1])
+            else:
+                prose_lines.append(line)
+
+        prose = "\n".join(prose_lines).strip() if tool_lines_seen else content
+        if not prose:
+            return
+
+        # Re-check prose in case tool lines preceded a clarify/approval block in the same payload.
+        nested_prompt = _parse_interactive_prompt(prose)
+        if nested_prompt is not None:
+            await self._emit_prompt(run, nested_prompt)
+            return
+
+        await self._close_active_tool(run, "done")
+        if prose.startswith(run.emitted):
+            delta = prose[len(run.emitted):]
+            if delta:
+                await self._send_ws_delta(run.run_id, delta)
+                run.emitted = prose
+        elif not run.emitted:
+            await self._send_ws_delta(run.run_id, prose)
+            run.emitted = prose
+        elif is_final and prose != run.emitted:
+            await self._finish_run(run, content_override=prose)
+        elif prose != run.emitted:
+            chunk = ("\n\n" if run.emitted else "") + prose
+            await self._send_ws_delta(run.run_id, chunk)
+            run.emitted += chunk
+
+    async def send_clarify(
+        self,
+        chat_id: str,
+        question: str,
+        choices: Optional[List[str]] = None,
+        *,
+        clarify_id: Optional[str] = None,
+        session_key: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **_kwargs: Any,
+    ) -> SendResult:
+        meta = metadata or {}
+        thread_id = meta.get("thread_id") or meta.get("thread_root_id")
+        active = self._lookup_active_run(chat_id, thread_id)
+        options: List[Dict[str, Any]] = []
+        for idx, choice in enumerate(choices or [], start=1):
+            label = str(choice).strip()
+            if not label:
+                continue
+            style = "primary" if re.search(r"\(recommended\)|推荐", label, re.I) else "default"
+            options.append({"label": label[:200], "value": str(idx), "style": style})
+        if not any(opt["value"].lower() == "skip" or opt["label"] in ("跳过", "Skip") for opt in options):
+            options.append({"label": "跳过", "value": "skip", "style": "default"})
+        pid = str(clarify_id or f"clarify-{uuid.uuid4().hex[:10]}")
+        prompt_block = {
+            "id": pid,
+            "kind": "choice",
+            "title": str(question).strip()[:2000] or "请选择一项",
+            "options": options[:20],
+            "allow_custom": True,
+        }
+        if active is not None and self._ws is not None:
+            await self._emit_prompt(active, prompt_block, {"kind": "choice", "session_key": session_key, "clarify_id": clarify_id})
+            return SendResult(success=True, message_id=active.message_id)
+        return await self.send(chat_id, str(question), metadata=metadata)
+
+    async def send_exec_approval(
+        self,
+        chat_id: str,
+        command: str = "",
+        description: str = "",
+        *,
+        approval_id: Optional[str] = None,
+        session_key: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
+    ) -> SendResult:
+        meta = metadata or {}
+        thread_id = meta.get("thread_id") or meta.get("thread_root_id")
+        active = self._lookup_active_run(chat_id, thread_id)
+        detail = "\n".join(part for part in [str(description or "").strip(), str(command or kwargs.get("cmd") or "").strip()] if part)
+        pid = str(approval_id or f"approval-{uuid.uuid4().hex[:10]}")
+        prompt_block = {
+            "id": pid,
+            "kind": "approval",
+            "title": "需要执行权限确认",
+            "description": detail[:4000] if detail else "该操作需要你的授权才能继续执行",
+            "options": [
+                {"label": "允许本次", "value": "once", "style": "primary"},
+                {"label": "本次会话允许", "value": "session", "style": "default"},
+                {"label": "始终允许", "value": "always", "style": "default"},
+                {"label": "拒绝", "value": "deny", "style": "danger"},
+            ],
+            "allow_custom": False,
+        }
+        if active is not None and self._ws is not None:
+            await self._emit_prompt(active, prompt_block, {"kind": "approval", "session_key": session_key, "approval_id": approval_id})
+            return SendResult(success=True, message_id=active.message_id)
+        return await self.send(chat_id, detail or "需要执行权限确认", metadata=metadata)
+
     async def send(
         self,
         chat_id: str,
@@ -367,22 +648,10 @@ class ChlorIMAdapter(BasePlatformAdapter):
     ) -> SendResult:
         meta = metadata or {}
         thread_id = meta.get("thread_id") or meta.get("thread_root_id")
-        active = self._runs_by_scope.get((chat_id, thread_id))
-        if active is None and thread_id is None:
-            # Match any open run in this chat if caller omitted thread metadata.
-            for candidate in self._runs_by_scope.values():
-                if candidate.channel_id == chat_id and not candidate.finished:
-                    active = candidate
-                    break
+        active = self._lookup_active_run(chat_id, thread_id)
 
-        if active is not None and not active.finished and self._ws is not None:
-            if content:
-                delta = content[len(active.emitted):] if content.startswith(active.emitted) else (
-                    ("\n\n" if active.emitted else "") + content
-                )
-                if delta:
-                    await self._send_ws_delta(active.run_id, delta)
-                    active.emitted += delta
+        if active is not None and self._ws is not None:
+            await self._emit_structured_content(active, content, is_final=False)
             return SendResult(success=True, message_id=active.message_id)
 
         # Proactive / Cron / Follow-up message -> ChlorIM Bot REST API
@@ -412,31 +681,8 @@ class ChlorIMAdapter(BasePlatformAdapter):
     ) -> SendResult:
         active = self._runs_by_message.get(message_id)
         if active is not None and not active.finished and self._ws is not None:
-            if content.startswith(active.emitted):
-                delta = content[len(active.emitted):]
-                if delta:
-                    await self._send_ws_delta(active.run_id, delta)
-                    active.emitted = content
-            elif content and content != active.emitted:
-                # Non-monotonic edit (e.g. rolling tool progress lines or replacing a draft).
-                # Do NOT finish the run early while finalize=False; only patch final content on finalize=True.
-                if not active.emitted:
-                    await self._send_ws_delta(active.run_id, content)
-                    active.emitted = content
-                elif finalize:
-                    await self._finish_run(active, content_override=content)
-                    return SendResult(success=True, message_id=message_id)
-                else:
-                    # Append only newly added lines so live progress keeps streaming smoothly in the same bubble.
-                    prev_lines = active.emitted.splitlines()
-                    next_lines = content.splitlines()
-                    new_lines = [line for line in next_lines if line and line not in prev_lines]
-                    if new_lines:
-                        chunk = "\n" + "\n".join(new_lines)
-                        await self._send_ws_delta(active.run_id, chunk)
-                        active.emitted += chunk
-
-            if finalize:
+            await self._emit_structured_content(active, content, is_final=finalize)
+            if finalize and not active.finished:
                 await self._finish_run(active)
             return SendResult(success=True, message_id=message_id)
 
@@ -480,6 +726,7 @@ class ChlorIMAdapter(BasePlatformAdapter):
     ) -> None:
         if run.finished:
             return
+        await self._close_active_tool(run, "error" if error else "done")
         run.finished = True
         run.done_event.set()
         self._runs_by_scope.pop((run.channel_id, run.thread_root_id), None)
@@ -551,6 +798,8 @@ class ChlorIMAdapter(BasePlatformAdapter):
                 await self._handle_fs_list(event.get("request_id", ""), event.get("path"))
             elif kind == "run.start":
                 self._spawn_run(event)
+            elif kind == "run.input":
+                asyncio.create_task(self._handle_run_input(event), name="chlorim-run-input")
             elif kind == "run.abort":
                 run = self._runs_by_id.get(event.get("run_id", ""))
                 if run and run.task and not run.task.done():
@@ -618,6 +867,48 @@ class ChlorIMAdapter(BasePlatformAdapter):
                 "entries": [],
                 "error": str(exc)[:1000],
             })
+
+    async def _handle_run_input(self, event: Dict[str, Any]) -> None:
+        run_id = str(event.get("run_id") or "")
+        prompt_id = event.get("prompt_id")
+        content = str(event.get("content") or "").strip()
+        sender = event.get("sender") or {}
+        run = self._runs_by_id.get(run_id)
+        if run is None or run.finished or not content:
+            return
+        try:
+            prompt_meta = run.pending_prompts.pop(str(prompt_id), None) if prompt_id else None
+            if prompt_meta and prompt_meta.get("kind") == "approval":
+                session_key = prompt_meta.get("session_key")
+                if session_key:
+                    try:
+                        from tools.approval import resolve_gateway_approval  # type: ignore[import-not-found]
+                        if resolve_gateway_approval(session_key, content):
+                            return
+                    except Exception:
+                        pass
+
+            chat_info = await self.get_chat_info(run.channel_id)
+            chat_type = "dm" if chat_info.get("type") == "dm" else "group"
+            chat_name = chat_info.get("name") or run.channel_id
+            source = self._make_source(
+                chat_id=run.channel_id,
+                chat_type=chat_type,
+                chat_name=chat_name,
+                user_id=str(sender.get("username") or sender.get("id") or ""),
+                user_name=str(sender.get("display_name") or sender.get("username") or "user"),
+                thread_id=run.thread_root_id,
+            )
+            msg_event = self._make_event(
+                text=content,
+                source=source,
+                message_id=f"input:{run.message_id}:{uuid.uuid4().hex[:8]}",
+                raw_message=event,
+                is_command=content.startswith("/"),
+            )
+            await self.handle_message(msg_event)
+        except Exception:
+            logger.exception("Error forwarding ChlorIM run.input for run %s", run_id)
 
     def _spawn_run(self, event: Dict[str, Any]) -> None:
         run_id = str(event["run_id"])
@@ -689,7 +980,7 @@ class ChlorIMAdapter(BasePlatformAdapter):
                         await asyncio.wait_for(run.handler_started.wait(), timeout=10.0)
                     except asyncio.TimeoutError:
                         if not run.finished:
-                            if run.emitted:
+                            if run.has_output:
                                 await self._finish_run(run)
                             else:
                                 await self._finish_run(

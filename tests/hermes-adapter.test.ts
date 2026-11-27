@@ -152,6 +152,134 @@ asyncio.run(main())
   expect(code, stderr).toBe(0)
 })
 
+test('folds Hermes tool lines into tool_call blocks and unblocks clarify & exec-approval prompts via button click or chat reply', async () => {
+  const h = await harness()
+  const owner = await h.person('interactive_user')
+  const general = await h.general(owner.token)
+  const root = mkdtempSync(join(tmpdir(), 'chiorim-hermes-interactive-'))
+  cleanup(() => rmSync(root, { recursive: true, force: true }))
+
+  const bot = await h.api<BotWriteResponse>('POST', '/api/bots', owner.token, {
+    mode: 'bridge', username: 'hermes_ux', display_name: 'Hermes UX', driver_hint: 'hermes',
+  }, 201)
+
+  const runnerScript = join(root, 'run_interactive.py')
+  writeFileSync(runnerScript, `
+import asyncio, sys
+sys.path.insert(0, ${JSON.stringify(resolve('packages/hermes-adapter'))})
+import adapter as plugin
+
+class InteractiveHermesAdapter(plugin.ChlorIMAdapter):
+    def __init__(self, cfg):
+        super().__init__(cfg)
+        self.pending_future = None
+
+    async def handle_message(self, event):
+        # Simulates Hermes gateway intercepting pending clarify/approval replies immediately!
+        if self.pending_future is not None and not self.pending_future.done():
+            self.pending_future.set_result(event.text)
+            return None
+        async def _bg():
+            await self._message_handler(event)
+        asyncio.create_task(_bg())
+        return None
+
+async def main():
+    gw = InteractiveHermesAdapter(plugin.PlatformConfig(enabled=True))
+
+    async def on_event(event):
+        # 1. Emit tool progress lines -> should fold into tool_call blocks, NOT prose!
+        await gw.send(event.source.chat_id, "💻 Running ls -la\\n⚙️ tool_search: \\"cronjob\\"")
+
+        # 2. Ask a clarify choice question via plain text fallback -> should become a choice prompt card!
+        gw.pending_future = asyncio.get_running_loop().create_future()
+        await gw.send(event.source.chat_id, "❓ 【测试①单选】请选择\\nReply \\"skip\\" to skip this question.\\n1. 选项A (Recommended)\\n2. 选项B\\nReply with the number, the option text, or your own answer.")
+        choice_ans = await asyncio.wait_for(gw.pending_future, timeout=5.0)
+        gw.pending_future = None
+
+        # 3. Ask for dangerous command execution approval via send_exec_approval -> approval card!
+        gw.pending_future = asyncio.get_running_loop().create_future()
+        await gw.send_exec_approval(event.source.chat_id, command="rm -rf /tmp/demo", description="Delete temp directory", approval_id="appr-1")
+        approval_ans = await asyncio.wait_for(gw.pending_future, timeout=5.0)
+        gw.pending_future = None
+
+        return f"Done: choice={choice_ans}, approval={approval_ans}"
+
+    gw.set_message_handler(on_event)
+    assert await gw.connect() is True
+    print("READY", flush=True)
+    await asyncio.to_thread(sys.stdin.readline)
+    await gw.disconnect()
+
+asyncio.run(main())
+`)
+
+  const child = spawn('python3', [runnerScript], {
+    env: { ...process.env, CHLORIM_URL: h.url, CHLORIM_BOT_TOKEN: bot.bot_token! },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  })
+  let stdout = ''
+  let stderr = ''
+  child.stdout.on('data', chunk => { stdout += chunk.toString() })
+  child.stderr.on('data', chunk => { stderr += chunk.toString() })
+  const exited = once(child, 'exit')
+  cleanup(async () => {
+    if (child.exitCode === null) {
+      child.stdin.end()
+      await Promise.race([exited, new Promise(r => setTimeout(() => { child.kill('SIGKILL'); r(null) }, 2000))])
+    }
+  })
+
+  await waitFor(async () => stdout.includes('READY') ? true : (child.exitCode !== null ? Promise.reject(new Error(`Python exited early: ${stderr}`)) : undefined))
+
+  await h.api<Message>('POST', `/api/channels/${general.id}/messages`, owner.token, { content: '@hermes_ux 都测一下吧' }, 201)
+
+  // Wait for choice prompt card + folded tool_call blocks while message is still streaming.
+  const withChoice = await waitFor(async () => {
+    const page = await h.api<MessagePage>('GET', `/api/channels/${general.id}/messages`, owner.token)
+    const msg = page.messages.find(m => m.author_id === bot.user_id && m.status === 'streaming')
+    return msg?.blocks.some(b => b.type === 'prompt' && b.kind === 'choice') ? msg : undefined
+  })
+  const toolBlocks = withChoice.blocks.filter(b => b.type === 'tool_call')
+  expect(toolBlocks.length).toBeGreaterThanOrEqual(2)
+  expect(withChoice.content).toBe('')
+  const choicePrompt = withChoice.blocks.find(b => b.type === 'prompt' && b.kind === 'choice')!
+  expect(choicePrompt.type === 'prompt' && choicePrompt.options.map(o => o.value)).toEqual(['1', '2', 'skip'])
+
+  // Answer choice card by clicking option button via POST /api/messages/:id/respond.
+  await h.api<Message>('POST', `/api/messages/${withChoice.id}/respond`, owner.token, {
+    prompt_id: choicePrompt.type === 'prompt' ? choicePrompt.id : undefined,
+    value: '1',
+    label: '选项A (Recommended)',
+  })
+
+  // Wait for approval prompt card.
+  await waitFor(async () => {
+    const page = await h.api<MessagePage>('GET', `/api/channels/${general.id}/messages`, owner.token)
+    const msg = page.messages.find(m => m.id === withChoice.id)
+    return msg?.blocks.some(b => b.type === 'prompt' && b.kind === 'approval') ? msg : undefined
+  })
+
+  // Answer approval card by typing directly in chat (no @mention needed, zero deadlock, no second bot bubble!).
+  await h.api<Message>('POST', `/api/channels/${general.id}/messages`, owner.token, { content: 'once' }, 201)
+
+  const finished = await waitFor(async () => {
+    const page = await h.api<MessagePage>('GET', `/api/channels/${general.id}/messages`, owner.token)
+    const msg = page.messages.find(m => m.id === withChoice.id && m.status === 'done')
+    return msg
+  })
+  expect(finished.content).toBe('Done: choice=1, approval=once')
+  expect(finished.blocks.filter(b => b.type === 'prompt').every(b => b.type === 'prompt' && Boolean(b.resolved_value))).toBe(true)
+  expect(finished.blocks.filter(b => b.type === 'tool_call').every(b => b.type === 'tool_call' && b.status === 'done')).toBe(true)
+  const finalPage = await h.api<MessagePage>('GET', `/api/channels/${general.id}/messages`, owner.token)
+  expect(finalPage.messages.filter(m => m.author_id === bot.user_id)).toHaveLength(1)
+
+  child.stdin.write('QUIT\n')
+  child.stdin.end()
+  const [code] = await exited
+  expect(code, stderr).toBe(0)
+})
+
 test('waits for background Hermes BasePlatformAdapter.handle_message tasks and surfaces empty drops as errors', async () => {
   const h = await harness()
   const owner = await h.person('hermes_bg_owner')

@@ -92,10 +92,27 @@ export const toolSchema = z.object({
   id: idSchema, name: z.string().min(1).max(256), input: z.unknown().optional(),
   output: z.unknown().optional(), status: z.enum(['running', 'done', 'error']),
 })
+export const promptOptionSchema = z.object({
+  label: z.string().min(1).max(200),
+  value: z.string().min(1).max(1000),
+  style: z.enum(['primary', 'danger', 'default']).optional(),
+})
+export const promptBlockSchema = z.object({
+  id: idSchema,
+  kind: z.enum(['choice', 'approval']),
+  title: z.string().min(1).max(2000),
+  description: z.string().max(8000).optional(),
+  options: z.array(promptOptionSchema).min(1).max(20),
+  allow_custom: z.boolean().optional(),
+  resolved_value: z.string().max(4000).optional(),
+  resolved_label: z.string().max(400).optional(),
+  resolved_by: z.string().max(100).optional(),
+})
 export const blockSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('thinking'), text: z.string() }),
   toolSchema.extend({ type: z.literal('tool_call') }),
   attachmentSchema.extend({ type: z.literal('attachment') }),
+  promptBlockSchema.extend({ type: z.literal('prompt') }),
 ])
 export const reactionSummarySchema = z.object({
   emoji: z.string().min(1).max(32),
@@ -187,6 +204,8 @@ export type ReactionSummary = z.infer<typeof reactionSummarySchema>
 export type MessageBlock = z.infer<typeof blockSchema>
 export type Attachment = z.infer<typeof attachmentSchema>
 export type ToolCall = z.infer<typeof toolSchema>
+export type PromptOption = z.infer<typeof promptOptionSchema>
+export type PromptBlock = z.infer<typeof promptBlockSchema>
 export type ContextEntry = z.infer<typeof contextEntrySchema>
 export type BridgeRuntime = z.infer<typeof runtimeSchema>
 export type BridgeFsEntry = z.infer<typeof bridgeFsEntrySchema>

@@ -101,6 +101,9 @@ export const toggleReaction = (messageId: string, emoji: string): Promise<{ reac
 export const regenerateMessage = (messageId: string): Promise<Message> =>
   api(`/messages/${messageId}/regenerate`, messageSchema, 'POST')
 
+export const respondPrompt = (messageId: string, payload: { prompt_id?: string; value: string; label?: string }): Promise<Message> =>
+  api(`/messages/${messageId}/respond`, messageSchema, 'POST', payload)
+
 export const clearBotSessions = (botId: string, scope?: { channel_id?: string; thread_root_id?: string }) => {
   const query = new URLSearchParams()
   if (scope?.channel_id) query.set('channel_id', scope.channel_id)
