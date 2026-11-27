@@ -53,7 +53,7 @@ export async function* runProvider(
       url = append(provider.base_url, '/messages')
       // Anthropic user content is required even for attachment-only messages.
       payload = {
-        model: bot.model, stream: true, max_tokens: 4096,
+        model: bot.model, stream: true, max_tokens: 8192,
         system: system || undefined,
         messages: [{ role: 'user', content: images.length ? [
           ...images.map(image => ({ type: 'image', source: { type: 'base64', media_type: image.mime, data: image.base64 } })),

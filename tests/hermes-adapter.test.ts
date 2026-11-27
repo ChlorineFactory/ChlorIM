@@ -410,10 +410,16 @@ import adapter as plugin
 async def main():
     gw = plugin.ChlorIMAdapter(plugin.PlatformConfig(enabled=True))
     async def on_event(event):
-        # Tool-only progress bubble with finalize=True followed by delete_message must NOT prematurely end the run!
+        # Multi-step Hermes turn: intro prose -> tool progress with finalize=True + delete_message ->
+        # second prose -> more tools -> uploads -> final prose. The run MUST stay alive until handler returns!
+        intro = await gw.send(event.source.chat_id, "收到~我先去查一下文件")
+        assert intro.success
         progress = await gw.send(event.source.chat_id, "💻 Running ls -la")
-        await gw.edit_message(event.source.chat_id, progress.message_id, "🧠 Updating memory: saved", finalize=True)
+        await gw.edit_message(event.source.chat_id, progress.message_id, "💻 Running ls -la\\n🧠 Updating memory: saved", finalize=True)
         assert await gw.delete_message(event.source.chat_id, progress.message_id) is True
+        await asyncio.sleep(0.1)
+        mid = await gw.send(event.source.chat_id, "查到了，继续处理中")
+        await gw.edit_message(event.source.chat_id, mid.message_id, "查到了，继续处理中...", finalize=True)
         # Upload local image + PDF via native adapter methods
         img_res = await gw.send_image(event.source.chat_id, ${JSON.stringify(sampleImg)}, caption="Generated chart")
         assert img_res.success, img_res.error
@@ -452,7 +458,7 @@ asyncio.run(main())
     const page = await h.api<MessagePage>('GET', `/api/channels/${general.id}/messages`, owner.token)
     return page.messages.find(m => m.author_id === bot.user_id && m.status === 'done' && m.content.includes('Final answer'))
   })
-  expect(finalMsg.content).toBe('Final answer after tool progress and uploads')
+  expect(finalMsg.content).toBe('收到~我先去查一下文件\n\n查到了，继续处理中...\n\nFinal answer after tool progress and uploads')
   expect(finalMsg.blocks.filter(b => b.type === 'tool_call')).toHaveLength(2)
 
   const page = await h.api<MessagePage>('GET', `/api/channels/${general.id}/messages`, owner.token)

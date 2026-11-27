@@ -168,7 +168,7 @@ class StdlibWebSocket:
             data = bytes(b ^ mask[i & 3] for i, b in enumerate(data))
         return fin, opcode, data
 
-    async def recv(self, timeout: float = 75.0) -> str:
+    async def recv(self, timeout: float = 95.0) -> str:
         chunks: list[bytes] = []
         while True:
             try:
@@ -209,7 +209,7 @@ class _WebsocketsCompat:
     async def ping(self) -> None:
         await self._conn.ping()
 
-    async def recv(self, timeout: float = 75.0) -> str:
+    async def recv(self, timeout: float = 95.0) -> str:
         try:
             msg = await asyncio.wait_for(self._conn.recv(), timeout=timeout)
             return msg if isinstance(msg, str) else msg.decode("utf-8")
@@ -233,7 +233,12 @@ async def open_websocket(
     timeout: float = 10.0,
 ) -> Any:
     if _websockets is not None:
-        kwargs: Dict[str, Any] = {"open_timeout": timeout, "max_size": 32 * 1024 * 1024}
+        kwargs: Dict[str, Any] = {
+            "open_timeout": timeout,
+            "max_size": 32 * 1024 * 1024,
+            "ping_interval": 25,
+            "ping_timeout": 60,
+        }
         try:
             conn = await _websockets.connect(url, additional_headers=headers or {}, **kwargs)
         except TypeError:

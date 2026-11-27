@@ -41,13 +41,18 @@ export function createChiorServer(options: ServerOptions = {}): ChiorServer {
     }
   })
   const wss = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024 * 1024 })
-  const live = new Map<WebSocket, boolean>()
+  const lastSeen = new Map<WebSocket, number>()
   let closing = false
 
+  function touch(ws: WebSocket) {
+    if (lastSeen.has(ws)) lastSeen.set(ws, Date.now())
+  }
+
   function track(ws: WebSocket) {
-    live.set(ws, true)
-    ws.on('pong', () => live.set(ws, true))
-    ws.on('close', () => live.delete(ws))
+    lastSeen.set(ws, Date.now())
+    ws.on('pong', () => touch(ws))
+    ws.on('ping', () => touch(ws))
+    ws.on('close', () => lastSeen.delete(ws))
     ws.on('error', () => ws.terminate())
   }
 
@@ -83,6 +88,7 @@ export function createChiorServer(options: ServerOptions = {}): ChiorServer {
           online_user_ids: realtime.members().filter(member => member.online).map(member => member.id), bridge_runtimes: bridgeRuntimes })
         if (!alreadyOnline) realtime.publish({ type: 'presence.update', user_id: userId, online: true })
         ws.on('message', (raw, binary) => {
+          touch(ws)
           if (closing || ws.readyState !== ws.OPEN) return
           const current = sessionById(connection.sessionId)
           if (!current || current.user.disabled) {
@@ -140,6 +146,7 @@ export function createChiorServer(options: ServerOptions = {}): ChiorServer {
         })
         writeSocket(ws, { type: 'bridge.welcome', bot_id: user.id, username: user.username, display_name: user.display_name })
         ws.on('message', (raw, binary) => {
+          touch(ws)
           if (closing || realtime.bridges.get(user.id) !== connection) return
           try {
             const event = parse(bridgeUpSchema, json(raw, binary))
@@ -155,7 +162,10 @@ export function createChiorServer(options: ServerOptions = {}): ChiorServer {
             } else {
               ws.close(1008, 'Expected bridge.hello')
             }
-          } catch { ws.close(1008, 'Invalid Bridge frame') }
+          } catch (error) {
+            console.warn('Closing bridge socket due to invalid frame:', error instanceof Error ? error.message : String(error))
+            ws.close(1008, 'Invalid Bridge frame')
+          }
         })
       })
       return
@@ -164,14 +174,14 @@ export function createChiorServer(options: ServerOptions = {}): ChiorServer {
   })
 
   const heartbeat = setInterval(() => {
+    const now = Date.now()
     for (const client of realtime.clients) {
       const current = sessionById(client.sessionId, false)
       if (!current || current.user.disabled) client.ws.close(4001, 'Session ended')
     }
-    for (const [ws, alive] of live) {
-      if (!alive) { ws.terminate(); continue }
+    for (const [ws, seenAt] of lastSeen) {
+      if (now - seenAt > 90_000) { ws.terminate(); continue }
       if (ws.readyState !== ws.OPEN) continue
-      live.set(ws, false)
       ws.ping()
     }
     for (const bridge of realtime.bridges.values()) writeSocket(bridge.ws, { type: 'ping' })
@@ -190,7 +200,7 @@ export function createChiorServer(options: ServerOptions = {}): ChiorServer {
     clearInterval(heartbeat)
     clearInterval(maintenance)
     engine.close()
-    for (const ws of live.keys()) ws.terminate()
+    for (const ws of lastSeen.keys()) ws.terminate()
     wss.close()
     closePromise = new Promise<void>((resolve, rejectClose) => {
       server.close(error => {

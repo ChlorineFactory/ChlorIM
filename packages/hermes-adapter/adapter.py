@@ -22,6 +22,7 @@ import mimetypes
 import os
 import re
 import socket
+import time
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import urllib.parse
 import uuid
@@ -285,6 +286,13 @@ def _parse_interactive_prompt(text: str) -> Optional[Dict[str, Any]]:
 
 
 @dataclass
+class _RunPart:
+    id: str
+    text: str = ""
+    deleted: bool = False
+
+
+@dataclass
 class _ActiveRun:
     run_id: str
     message_id: str
@@ -302,10 +310,21 @@ class _ActiveRun:
     seen_tool_lines: Set[str] = field(default_factory=set)
     seen_prompts: Set[str] = field(default_factory=set)
     pending_prompts: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    part_seq: int = 0
+    parts: List[_RunPart] = field(default_factory=list)
+    parts_by_id: Dict[str, _RunPart] = field(default_factory=dict)
+    needs_patch: bool = False
+    last_activity: float = field(default_factory=time.monotonic)
+
+    def touch(self) -> None:
+        self.last_activity = time.monotonic()
+
+    def joined_prose(self) -> str:
+        return "\n\n".join(part.text for part in self.parts if not part.deleted and part.text)
 
     @property
     def has_output(self) -> bool:
-        return bool(self.emitted or self.tool_seq or self.pending_prompts)
+        return bool(self.emitted or self.joined_prose() or self.tool_seq or self.pending_prompts)
 
 
 class ChlorIMAdapter(BasePlatformAdapter):
@@ -342,10 +361,22 @@ class ChlorIMAdapter(BasePlatformAdapter):
         self._bot_username: Optional[str] = None
         self._channels_cache: Dict[str, Dict[str, Any]] = {}
 
-        # Active ChlorIM run.start turns indexed by (channel_id, thread_root_id), message_id, and run_id
+        # Active ChlorIM run.start turns indexed by (channel_id, thread_root_id), message_id, virtual part_id, and run_id
         self._runs_by_scope: Dict[Tuple[str, Optional[str]], _ActiveRun] = {}
         self._runs_by_message: Dict[str, _ActiveRun] = {}
         self._runs_by_id: Dict[str, _ActiveRun] = {}
+        self._part_to_run: Dict[str, _ActiveRun] = {}
+
+    @property
+    def _message_handler(self) -> Optional[Callable[[Any], Any]]:
+        return getattr(self, "_wrapped_message_handler", None)
+
+    @_message_handler.setter
+    def _message_handler(self, handler: Optional[Callable[[Any], Any]]) -> None:
+        if handler is None or getattr(handler, "_chlorim_wrapped", False):
+            self._wrapped_message_handler = handler
+            return
+        self._wrapped_message_handler = self._wrap_message_handler(handler)
 
     @classmethod
     def _resolve_platform_enum(cls) -> Any:
@@ -384,6 +415,7 @@ class ChlorIMAdapter(BasePlatformAdapter):
         self._runs_by_scope.clear()
         self._runs_by_message.clear()
         self._runs_by_id.clear()
+        self._part_to_run.clear()
         if self._ws is not None:
             await self._ws.close(1000, "Hermes gateway shutting down")
             self._ws = None
@@ -402,29 +434,36 @@ class ChlorIMAdapter(BasePlatformAdapter):
                 return None
             if msg_id in self._runs_by_message:
                 return self._runs_by_message[msg_id]
+            if msg_id in self._part_to_run:
+                return self._part_to_run[msg_id]
         source = getattr(event, "source", None)
         chat_id = getattr(source, "chat_id", None)
         thread_id = getattr(source, "thread_id", None)
         if isinstance(chat_id, str):
             run = self._runs_by_scope.get((chat_id, thread_id))
-            if run is not None:
+            if run is not None and not run.finished:
                 return run
             for candidate in self._runs_by_scope.values():
                 if candidate.channel_id == chat_id and not candidate.finished:
                     return candidate
+        active_runs = [candidate for candidate in self._runs_by_id.values() if not candidate.finished]
+        if len(active_runs) == 1:
+            return active_runs[0]
         return None
 
-    def set_message_handler(self, handler: Callable[[Any], Any]) -> None:
+    def _wrap_message_handler(self, handler: Callable[[Any], Any]) -> Callable[[Any], Any]:
         async def _tracked_handler(event: Any) -> Any:
             run = self._find_run_for_event(event)
             if run is not None:
                 run.handler_started.set()
+                run.touch()
             try:
                 result = await handler(event)
             except asyncio.CancelledError:
                 if run is not None and not run.finished:
                     run.finished = True
                     run.done_event.set()
+                    self._cleanup_run(run)
                 raise
             except Exception as exc:
                 logger.exception("Hermes message handler failed for ChlorIM event")
@@ -434,13 +473,14 @@ class ChlorIMAdapter(BasePlatformAdapter):
 
             if run is not None and not run.finished:
                 if isinstance(result, str) and result.strip():
-                    if not run.emitted:
-                        await self._emit_structured_content(run, result, is_final=True)
-                    await self._finish_run(run)
-                    # Return None so Hermes BasePlatformAdapter does not post a duplicate REST copy.
-                    return None
+                    current_prose = run.joined_prose().strip() or run.emitted.strip()
+                    if result.strip() != current_prose:
+                        await self._emit_structured_content(run, result)
                 if run.has_output:
-                    await self._finish_run(run)
+                    final_prose = run.joined_prose()
+                    override = final_prose if (run.needs_patch and final_prose and final_prose != run.emitted) else None
+                    await self._finish_run(run, content_override=override)
+                    # Return None so Hermes BasePlatformAdapter does not post a duplicate REST copy.
                     return None
                 # Handler returned nothing and emitted no deltas (e.g. unauthorized user dropped by Hermes).
                 await self._finish_run(
@@ -450,7 +490,12 @@ class ChlorIMAdapter(BasePlatformAdapter):
                 return None
             return result
 
-        super().set_message_handler(_tracked_handler)
+        setattr(_tracked_handler, "_chlorim_wrapped", True)
+        return _tracked_handler
+
+    def set_message_handler(self, handler: Callable[[Any], Any]) -> None:
+        wrapped = self._wrap_message_handler(handler) if not getattr(handler, "_chlorim_wrapped", False) else handler
+        super().set_message_handler(wrapped)
 
     # ------------------------------------------------------------------
     # Outbound BasePlatformAdapter methods
@@ -498,7 +543,16 @@ class ChlorIMAdapter(BasePlatformAdapter):
             "tool": finished,
         })
 
+    def _alloc_part(self, run: _ActiveRun) -> _RunPart:
+        run.part_seq += 1
+        part = _RunPart(id=f"{run.message_id}:p{run.part_seq}")
+        run.parts.append(part)
+        run.parts_by_id[part.id] = part
+        self._part_to_run[part.id] = run
+        return part
+
     async def _emit_tool_line(self, run: _ActiveRun, line: str, name: str, detail: str) -> None:
+        run.touch()
         if line in run.seen_tool_lines:
             return
         run.seen_tool_lines.add(line)
@@ -519,6 +573,7 @@ class ChlorIMAdapter(BasePlatformAdapter):
         })
 
     async def _emit_prompt(self, run: _ActiveRun, prompt_block: Dict[str, Any], meta: Optional[Dict[str, Any]] = None) -> None:
+        run.touch()
         await self._close_active_tool(run, "done")
         dedupe_key = f"{prompt_block.get('kind')}:{prompt_block.get('title')}:{len(prompt_block.get('options', []))}"
         if dedupe_key in run.seen_prompts:
@@ -532,9 +587,16 @@ class ChlorIMAdapter(BasePlatformAdapter):
             "prompt": prompt_block,
         })
 
-    async def _emit_structured_content(self, run: _ActiveRun, content: str, *, is_final: bool = False) -> None:
+    async def _emit_structured_content(
+        self,
+        run: _ActiveRun,
+        content: str,
+        *,
+        part: Optional[_RunPart] = None,
+    ) -> None:
         if not content:
             return
+        run.touch()
         # 1. Check if the entire message is an interactive clarify / approval prompt.
         prompt_block = _parse_interactive_prompt(content)
         if prompt_block is not None:
@@ -563,20 +625,30 @@ class ChlorIMAdapter(BasePlatformAdapter):
             return
 
         await self._close_active_tool(run, "done")
-        if prose.startswith(run.emitted):
-            delta = prose[len(run.emitted):]
+        target = part if part is not None else self._alloc_part(run)
+
+        if not target.text:
+            target.text = prose
+            if not run.needs_patch:
+                chunk = prose if not run.emitted else ("\n\n" + prose)
+                await self._send_ws_delta(run.run_id, chunk)
+                run.emitted += chunk
+            return
+
+        if prose == target.text:
+            return
+
+        latest_prose = next((p for p in reversed(run.parts) if not p.deleted and p.text), None)
+        if latest_prose is target and prose.startswith(target.text) and not run.needs_patch:
+            delta = prose[len(target.text):]
+            target.text = prose
             if delta:
                 await self._send_ws_delta(run.run_id, delta)
-                run.emitted = prose
-        elif not run.emitted:
-            await self._send_ws_delta(run.run_id, prose)
-            run.emitted = prose
-        elif is_final and prose != run.emitted:
-            await self._finish_run(run, content_override=prose)
-        elif prose != run.emitted:
-            chunk = ("\n\n" if run.emitted else "") + prose
-            await self._send_ws_delta(run.run_id, chunk)
-            run.emitted += chunk
+                run.emitted += delta
+        else:
+            # Non-monotonic edit (e.g. rolling draft replacement) -> defer clean patch to run completion.
+            target.text = prose
+            run.needs_patch = True
 
     async def send_clarify(
         self,
@@ -601,7 +673,7 @@ class ChlorIMAdapter(BasePlatformAdapter):
             options.append({"label": label[:200], "value": str(idx), "style": style})
         if not any(opt["value"].lower() == "skip" or opt["label"] in ("跳过", "Skip") for opt in options):
             options.append({"label": "跳过", "value": "skip", "style": "default"})
-        pid = str(clarify_id or f"clarify-{uuid.uuid4().hex[:10]}")
+        pid = str(clarify_id or f"clarify-{uuid.uuid4().hex[:10]}")[:128]
         prompt_block = {
             "id": pid,
             "kind": "choice",
@@ -610,8 +682,9 @@ class ChlorIMAdapter(BasePlatformAdapter):
             "allow_custom": True,
         }
         if active is not None and self._ws is not None:
+            part = self._alloc_part(active)
             await self._emit_prompt(active, prompt_block, {"kind": "choice", "session_key": session_key, "clarify_id": clarify_id})
-            return SendResult(success=True, message_id=active.message_id)
+            return SendResult(success=True, message_id=part.id)
         return await self.send(chat_id, str(question), metadata=metadata)
 
     async def send_exec_approval(
@@ -629,7 +702,7 @@ class ChlorIMAdapter(BasePlatformAdapter):
         thread_id = meta.get("thread_id") or meta.get("thread_root_id")
         active = self._lookup_active_run(chat_id, thread_id)
         detail = "\n".join(part for part in [str(description or "").strip(), str(command or kwargs.get("cmd") or "").strip()] if part)
-        pid = str(approval_id or f"approval-{uuid.uuid4().hex[:10]}")
+        pid = str(approval_id or f"approval-{uuid.uuid4().hex[:10]}")[:128]
         prompt_block = {
             "id": pid,
             "kind": "approval",
@@ -644,8 +717,9 @@ class ChlorIMAdapter(BasePlatformAdapter):
             "allow_custom": False,
         }
         if active is not None and self._ws is not None:
+            part = self._alloc_part(active)
             await self._emit_prompt(active, prompt_block, {"kind": "approval", "session_key": session_key, "approval_id": approval_id})
-            return SendResult(success=True, message_id=active.message_id)
+            return SendResult(success=True, message_id=part.id)
         return await self.send(chat_id, detail or "需要执行权限确认", metadata=metadata)
 
     async def send(
@@ -660,8 +734,9 @@ class ChlorIMAdapter(BasePlatformAdapter):
         active = self._lookup_active_run(chat_id, thread_id)
 
         if active is not None and self._ws is not None:
-            await self._emit_structured_content(active, content, is_final=False)
-            return SendResult(success=True, message_id=active.message_id)
+            part = self._alloc_part(active)
+            await self._emit_structured_content(active, content, part=part)
+            return SendResult(success=True, message_id=part.id)
 
         # Proactive / Cron / Follow-up message -> ChlorIM Bot REST API
         body: Dict[str, Any] = {"content": content}
@@ -688,19 +763,26 @@ class ChlorIMAdapter(BasePlatformAdapter):
         *,
         finalize: bool = False,
     ) -> SendResult:
-        active = self._runs_by_message.get(message_id)
+        active = self._runs_by_message.get(message_id) or self._part_to_run.get(message_id)
         if active is not None and not active.finished and self._ws is not None:
-            await self._emit_structured_content(active, content, is_final=finalize)
-            # Only finalize the run when actual prose has been emitted; tool-only progress edits
-            # may pass finalize=True before Hermes sends the real final reply.
-            if finalize and not active.finished and active.emitted:
-                await self._finish_run(active)
+            part = active.parts_by_id.get(message_id)
+            if part is None:
+                part = active.parts[-1] if active.parts else self._alloc_part(active)
+            await self._emit_structured_content(active, content, part=part)
+            # Only finalize from edit_message when no tracked Hermes handler owns the lifecycle.
+            # Inside Hermes Gateway, a multi-step turn may call edit_message(..., finalize=True)
+            # on intermediate drafts or tool-progress bubbles before the turn actually completes.
+            if finalize and not active.finished and not active.handler_started.is_set() and active.joined_prose():
+                final_prose = active.joined_prose()
+                override = final_prose if (active.needs_patch and final_prose != active.emitted) else None
+                await self._finish_run(active, content_override=override)
             return SendResult(success=True, message_id=message_id)
 
-        # Fallback: edit a previously sent REST message directly
+        # Fallback: edit a previously sent REST message directly (strip virtual :pN suffix if present)
+        real_id = message_id.split(":p", 1)[0]
         status, payload = await http_json(
             "PATCH",
-            f"{self.http_base}/api/messages/{urllib.parse.quote(message_id, safe='')}",
+            f"{self.http_base}/api/messages/{urllib.parse.quote(real_id, safe='')}",
             headers=self._auth_headers,
             body={"content": content},
         )
@@ -711,7 +793,15 @@ class ChlorIMAdapter(BasePlatformAdapter):
 
     async def delete_message(self, chat_id: str, message_id: str) -> bool:
         # Never delete the active streaming ChlorIM bubble when Hermes dismisses a progress bubble.
-        if message_id in self._runs_by_message:
+        active = self._runs_by_message.get(message_id) or self._part_to_run.get(message_id)
+        if active is not None:
+            part = active.parts_by_id.get(message_id)
+            if part is not None:
+                if part.text:
+                    active.needs_patch = True
+                part.deleted = True
+            return True
+        if ":p" in message_id:
             return True
         status, _ = await http_json(
             "DELETE",
@@ -834,6 +924,15 @@ class ChlorIMAdapter(BasePlatformAdapter):
                 "delta": text[offset:offset + chunk_size],
             })
 
+    def _cleanup_run(self, run: _ActiveRun) -> None:
+        scope_key = (run.channel_id, run.thread_root_id)
+        if self._runs_by_scope.get(scope_key) is run:
+            self._runs_by_scope.pop(scope_key, None)
+        self._runs_by_message.pop(run.message_id, None)
+        self._runs_by_id.pop(run.run_id, None)
+        for part in run.parts:
+            self._part_to_run.pop(part.id, None)
+
     async def _finish_run(
         self,
         run: _ActiveRun,
@@ -846,13 +945,11 @@ class ChlorIMAdapter(BasePlatformAdapter):
         await self._close_active_tool(run, "error" if error else "done")
         run.finished = True
         run.done_event.set()
-        self._runs_by_scope.pop((run.channel_id, run.thread_root_id), None)
-        self._runs_by_message.pop(run.message_id, None)
-        self._runs_by_id.pop(run.run_id, None)
+        self._cleanup_run(run)
         if error:
             await self._ws_send({"type": "run.error", "run_id": run.run_id, "error": error[:4000]})
             return
-        await self._ws_send({"type": "run.done", "run_id": run.run_id, "external_session_id": run.scope_key})
+        await self._ws_send({"type": "run.done", "run_id": run.run_id, "external_session_id": run.scope_key[:1024]})
         if content_override is not None:
             await http_json(
                 "PATCH",
@@ -905,14 +1002,17 @@ class ChlorIMAdapter(BasePlatformAdapter):
                     "driver": "hermes",
                     "cwd": self.cwd,
                     "allowed_roots": self.allowed_roots,
-                    "version": "0.4.5",
+                    "version": "0.4.6",
                 })
                 self._mark_connected()
                 self._ready_event.set()
             elif kind == "ping":
                 await self._ws_send({"type": "pong"})
             elif kind == "fs.list":
-                await self._handle_fs_list(event.get("request_id", ""), event.get("path"))
+                asyncio.create_task(
+                    self._handle_fs_list(event.get("request_id", ""), event.get("path")),
+                    name="chlorim-fs-list",
+                )
             elif kind == "run.start":
                 self._spawn_run(event)
             elif kind == "run.input":
@@ -1090,28 +1190,37 @@ class ChlorIMAdapter(BasePlatformAdapter):
                 return
 
             # In real Hermes Gateway, BasePlatformAdapter.handle_message() spawns a background task
-            # and returns None immediately. Wait for the tracked handler (or finalize=True) to finish.
+            # and returns None immediately. Wait for the tracked handler to finish without cutting off
+            # active multi-step turns early.
             if not run.finished:
-                if not run.handler_started.is_set():
+                started_at = time.monotonic()
+                while not run.finished and not run.handler_started.is_set():
                     try:
-                        await asyncio.wait_for(run.handler_started.wait(), timeout=10.0)
+                        await asyncio.wait_for(run.handler_started.wait(), timeout=5.0)
+                        break
                     except asyncio.TimeoutError:
-                        if not run.finished:
-                            if run.has_output:
-                                await self._finish_run(run)
-                            else:
-                                await self._finish_run(
-                                    run,
-                                    error="Hermes Gateway 未处理此消息（请确认已启用 chlorim 插件并在 ~/.hermes/.env 配置 CHLORIM_ALLOW_ALL_USERS=true）",
-                                )
-                        return
-                await run.done_event.wait()
+                        if run.finished:
+                            return
+                        if run.has_output:
+                            # Output is actively flowing even without handler_started; wait until idle.
+                            if time.monotonic() - run.last_activity >= 120.0:
+                                final_prose = run.joined_prose()
+                                override = final_prose if (run.needs_patch and final_prose and final_prose != run.emitted) else None
+                                await self._finish_run(run, content_override=override)
+                                return
+                            continue
+                        if time.monotonic() - started_at >= 30.0:
+                            await self._finish_run(
+                                run,
+                                error="Hermes Gateway 未处理此消息（请确认已启用 chlorim 插件并在 ~/.hermes/.env 配置 CHLORIM_ALLOW_ALL_USERS=true）",
+                            )
+                            return
+                if not run.finished:
+                    await run.done_event.wait()
         except asyncio.CancelledError:
             run.finished = True
             run.done_event.set()
-            self._runs_by_scope.pop((run.channel_id, run.thread_root_id), None)
-            self._runs_by_message.pop(run.message_id, None)
-            self._runs_by_id.pop(run.run_id, None)
+            self._cleanup_run(run)
         except Exception as exc:
             logger.exception("Error processing ChlorIM run %s", run.run_id)
             await self._finish_run(run, error=str(exc) or "Hermes agent error")
